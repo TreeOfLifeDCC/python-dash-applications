@@ -1,15 +1,13 @@
 import math
 import urllib
-
 import dash
-import os
-
 import numpy as np
 from dash import dcc, callback, Output, Input, dash_table, State, no_update, html, ctx
 import dash_bootstrap_components as dbc
 import plotly.express as px
 import pandas as pd
-import gcsfs
+import google.auth
+from gcsfs import GCSFileSystem
 
 dash.register_page(
     __name__,
@@ -17,8 +15,8 @@ dash.register_page(
     title="Sampling Map",
 )
 
-os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.expanduser("~/.gcp/dash-service-key.json")
-fs = gcsfs.GCSFileSystem(token=os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+credentials, project = google.auth.default()
+fs = GCSFileSystem(token=credentials)
 
 DATASETS = {}
 
@@ -36,8 +34,6 @@ def load_data(project_name):
         gcs_path = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
         with fs.open(gcs_path) as f:
             df_nested = pd.read_parquet(f, engine="pyarrow")
-
-        # df_nested = pd.read_parquet('/Users/yroochun/Projects/dtol-plotly/DTOL/fe/pages/metadata_dtol.parquet')
 
         df_exploded = df_nested.explode('organisms').reset_index(drop=True)
 
