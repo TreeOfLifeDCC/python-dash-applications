@@ -240,7 +240,7 @@ def layout(**kwargs):
                 "backgroundColor": "#f8f9fa",
                 "flex": "1"
             }),
-        ], className="mb-4", style={"display": "flex", "gap": "20px", "margin-top": "20px"}),
+        ], className="mb-4", style={"display": "flex", "gap": "20px", "marginTop": "20px"}),
 
         # map + left-side filters (current status and experiment type)
         dbc.Row([
