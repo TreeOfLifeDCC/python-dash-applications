@@ -3,6 +3,8 @@ import urllib
 
 import dash
 import os
+
+import numpy as np
 from dash import dcc, callback, Output, Input, dash_table, State, no_update, html, ctx
 import dash_bootstrap_components as dbc
 import plotly.express as px
@@ -22,10 +24,10 @@ DATASETS = {}
 
 # map project to parquet file path
 PROJECT_PARQUET_MAP = {
-    "dtol": "dtol_big_query_bucket/metadata_temp2.parquet",
-    "erga": "/path/to/erga.parquet",
-    "asg": "/path/to/asg.parquet",
-    "gbdp": "/path/to/gbdp.parquet"
+    "dtol": "python_dash_data_bucket/metadata_dtol.parquet",
+    "erga": "python_dash_data_bucket/metadata_erga.parquet",
+    "asg": "python_dash_data_bucket/metadata_asg.parquet",
+    "gbdp": "python_dash_data_bucket/metadata_gbdp.parquet"
 }
 
 
@@ -33,33 +35,68 @@ def load_data(project_name):
     if project_name not in DATASETS:
         gcs_path = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
         with fs.open(gcs_path) as f:
-            df = pd.read_parquet(f, engine="pyarrow")
+            df_nested = pd.read_parquet(f, engine="pyarrow")
+
+        # df_nested = pd.read_parquet('/Users/yroochun/Projects/dtol-plotly/DTOL/fe/pages/metadata_dtol.parquet')
+
+        df_exploded = df_nested.explode('organisms').reset_index(drop=True)
+
+        organisms_df = pd.json_normalize(df_exploded['organisms'].dropna(), sep='.')
+
+        # add prefix
+        organisms_df.columns = [f'organisms.{col}' for col in organisms_df.columns]
+
+        df = pd.concat([df_exploded.drop(columns=['organisms']), organisms_df], axis=1)
+
+        def extract_unique_protocols(raw_data_entry):
+            if isinstance(raw_data_entry, (list, np.ndarray)):
+                protocols = {
+                    item.get('library_construction_protocol')
+                    for item in raw_data_entry
+                    if isinstance(item, dict) and item.get('library_construction_protocol')
+                }
+                return ','.join(protocols) if protocols else None
+            return None
+
+        if 'raw_data' in df.columns:
+            df['experiment_type'] = df['raw_data'].apply(extract_unique_protocols)
+
+        df['experiment_type'] = df['experiment_type'].str.split(',')
+
+        df['experiment_type'] = df['experiment_type'].apply(
+            lambda x: [str(item) for item in x] if isinstance(x, list) else []
+        )
+        # explode the experiment_type so that we have a row for each experiment_type
+        df = df.explode('experiment_type').reset_index(drop=True)
 
         # process dataframe data
+        df["lat"] = pd.to_numeric(df["organisms.latitude"], errors='coerce')
+        df["lon"] = pd.to_numeric(df["organisms.longitude"], errors='coerce')
         df = df[(df["lat"].between(-90, 90)) & (df["lon"].between(-180, 180))]
         df["geotag"] = df["lat"].astype(str) + "," + df["lon"].astype(str)
-        df["Kingdom"] = df["kingdom_scientific_name"]
-        df["biosample_link"] = df["biosample_id"].apply(
+        df["Kingdom"] = df["phylogenetic_tree"].apply(
+            lambda x: x.get("kingdom", {}).get("scientific_name") if isinstance(x, dict) else None
+        )
+        df["biosample_link"] = df["organisms.biosample_id"].apply(
             lambda x: f"[{x}](https://portal.darwintreeoflife.org/organism/{x})")
-        df["organism_link"] = df["organism"].apply(
+        df["organism_link"] = df["organisms.organism"].apply(
             lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
 
         # group by 'geotag' and aggregate data
         grouped_data = df.groupby("geotag").agg({
             "lat": "first",
             "lon": "first",
-            "biosample_id": lambda x: ", ".join(set(filter(None, x))),
-            "organism": lambda x: ", ".join(set(filter(None, x))),
-            "common_name": lambda x: ", ".join(set(filter(None, x))),
-            "sex": lambda x: ", ".join(set(filter(None, x))),
-            "organism_part": lambda x: ", ".join(set(filter(None, x))),
+            "organisms.biosample_id": lambda x: ", ".join(set(filter(None, x))),
+            "organisms.organism": lambda x: ", ".join(set(filter(None, x))),
+            "organisms.common_name": lambda x: ", ".join(set(filter(None, x))),
+            "organisms.sex": lambda x: ", ".join(set(filter(None, x))),
+            "organisms.organism_part": lambda x: ", ".join(set(filter(None, x))),
             "Kingdom": lambda x: ", ".join(set(filter(None, x))),
-            "kingdom_scientific_name": lambda x: ", ".join(set(filter(None, x))),
             "current_status": lambda x: ", ".join(set(filter(None, x))),
-            "experiment_type": lambda x: ", ".join(set(filter(None, x))),
+            "experiment_type": lambda x: ", ".join(set(str(i).strip() for i in x if pd.notna(i))),
         }).reset_index()
 
-        grouped_data["Record Count"] = df.groupby("geotag")["biosample_id"].nunique().values
+        grouped_data["Record Count"] = df.groupby("geotag")["organisms.biosample_id"].nunique().values
 
         DATASETS[project_name] = {"df_data": df, "grouped_data": grouped_data}
     return DATASETS[project_name]
@@ -149,7 +186,6 @@ def layout(**kwargs):
 
             dbc.Col([
                 html.Div([
-
                     html.Div([
                         dbc.InputGroup([
                             dbc.Input(
@@ -261,7 +297,6 @@ def layout(**kwargs):
                 }),
 
                 html.Div([
-
                     html.Div([
                         dbc.InputGroup([
                             dbc.Input(
@@ -454,12 +489,17 @@ def clear_checklists(clear_org_clicks, clear_common_clicks, clear_status_clicks,
 def update_checklists(selected_organisms, selected_common_names, selected_current_status, selected_experiment_type,
                       search_organism, search_common_name, search_current_status, search_experiment_type,
                       checklist_selection_order, project_name):
+    user_selection = False
+
     data = load_data(project_name)["df_data"]
 
-    all_organisms = sorted(data["organism"].unique())
-    all_common_names = sorted(data["common_name"].unique())
+    all_organisms = sorted(data["organisms.organism"].unique())
+    all_common_names = sorted(data["organisms.common_name"].unique())
     all_current_status = sorted(data["current_status"].unique())
-    all_experiment_type = sorted(filter(None, data["experiment_type"].unique()))
+    # all_experiment_type = sorted(filter(None, data["experiment_type"].unique()))
+    all_experiment_type = sorted(
+        str(v).strip() for v in data["experiment_type"].unique() if pd.notna(v)
+    )
 
     # filter by search
     if search_organism:
@@ -473,28 +513,29 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                               search_current_status.lower() in status.lower()]
 
     if search_experiment_type:
-        all_experiment_type = [type for type in all_experiment_type if search_experiment_type.lower() in type.lower()]
+        all_experiment_type = [exp_type for exp_type in all_experiment_type if search_experiment_type.lower()
+                               in exp_type.lower()]
 
     grouped = {
-        col: data.groupby(col)[["organism", "common_name", "current_status", "experiment_type"]].agg(
+        col: data.groupby(col)[["organisms.organism", "organisms.common_name", "current_status", "experiment_type"]].agg(
             lambda x: set(x))
-        for col in ["organism", "common_name", "current_status", "experiment_type"]
+        for col in ["organisms.organism", "organisms.common_name", "current_status", "experiment_type"]
     }
 
-    org_to_common = grouped["organism"]["common_name"].to_dict()
-    org_to_current_status = grouped["organism"]["current_status"].to_dict()
-    org_to_experiment_type = grouped["organism"]["experiment_type"].to_dict()
+    org_to_common = grouped["organisms.organism"]["organisms.common_name"].to_dict()
+    org_to_current_status = grouped["organisms.organism"]["current_status"].to_dict()
+    org_to_experiment_type = grouped["organisms.organism"]["experiment_type"].to_dict()
 
-    common_to_org = grouped["common_name"]["organism"].to_dict()
-    common_to_current_status = grouped["common_name"]["current_status"].to_dict()
-    common_to_experiment_type = grouped["common_name"]["experiment_type"].to_dict()
+    common_to_org = grouped["organisms.common_name"]["organisms.organism"].to_dict()
+    common_to_current_status = grouped["organisms.common_name"]["current_status"].to_dict()
+    common_to_experiment_type = grouped["organisms.common_name"]["experiment_type"].to_dict()
 
-    status_to_org = grouped["current_status"]["organism"].to_dict()
-    status_to_common_name = grouped["current_status"]["common_name"].to_dict()
+    status_to_org = grouped["current_status"]["organisms.organism"].to_dict()
+    status_to_common_name = grouped["current_status"]["organisms.common_name"].to_dict()
     status_to_experiment_type = grouped["current_status"]["experiment_type"].to_dict()
 
-    experiment_type_to_org = grouped["experiment_type"]["organism"].to_dict()
-    experiment_type_to_common_name = grouped["experiment_type"]["common_name"].to_dict()
+    experiment_type_to_org = grouped["experiment_type"]["organisms.organism"].to_dict()
+    experiment_type_to_common_name = grouped["experiment_type"]["organisms.common_name"].to_dict()
     experiment_type_to_status = grouped["experiment_type"]["current_status"].to_dict()
 
     organism_options = [{"label": org, "value": org, "disabled": False}
@@ -519,6 +560,9 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
     }
 
     selections_list = [checklist_mappings[chk_id] for chk_id in checklist_selection_order]
+
+    if selections_list and len(selections_list) > 0:
+        user_selection = True
 
     allowed_orgs = set(all_organisms)
     allowed_common = set(all_common_names)
@@ -554,7 +598,6 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                     allowed_current_status.update(current_status)
                     allowed_experiment_type.update(exp_type)
 
-
         elif selection == 'selected_current_status':
             for i, status in enumerate(selected_current_status):
                 orgs = status_to_org.get(status, set())
@@ -569,7 +612,6 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                     allowed_orgs.update(orgs)
                     allowed_common.update(common)
                     allowed_experiment_type.update(exp_type)
-
 
         elif selection == 'selected_experiment_type':
             for i, exp_type in enumerate(selected_experiment_type):
@@ -586,28 +628,31 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                     allowed_common.update(common)
                     allowed_current_status.update(status)
 
-    if allowed_orgs:
+    if user_selection:
         organism_options = [
-            {"label": org, "value": org, "disabled": org not in allowed_orgs}
+            {"label": org, "value": org, "disabled": org not in allowed_orgs} if allowed_orgs
+            else {"label": org, "value": org, "disabled": True}
             for org in all_organisms
         ]
 
-    if allowed_common:
         common_name_options = [
-            {"label": name, "value": name, "disabled": name not in allowed_common}
+            {"label": name, "value": name, "disabled": name not in allowed_common} if allowed_common
+            else {"label": name, "value": name, "disabled": True}
             for name in all_common_names
         ]
 
-    if allowed_current_status:
         current_status_options = [
-            {"label": status, "value": status, "disabled": status not in allowed_current_status}
+            {"label": status, "value": status,
+             "disabled": status not in allowed_current_status} if allowed_current_status
+            else {"label": status, "value": status, "disabled": True}
             for status in all_current_status
         ]
 
-    if allowed_experiment_type:
         experiment_type_options = [
-            {"label": type, "value": type, "disabled": type not in allowed_experiment_type}
-            for type in all_experiment_type
+            {"label": exp_type, "value": exp_type,
+             "disabled": exp_type not in allowed_experiment_type} if allowed_experiment_type
+            else {"label": exp_type, "value": exp_type, "disabled": True}
+            for exp_type in all_experiment_type
         ]
 
     organism_options.sort(key=lambda x: (x["value"] not in (selected_organisms or []), x["disabled"]))
@@ -631,12 +676,12 @@ def build_map(selected_organisms, selected_common_names, selected_current_status
     filtered_map_data = load_data(project_name)["grouped_data"]
 
     if selected_organisms:
-        filtered_map_data = filtered_map_data[filtered_map_data["organism"].apply(
+        filtered_map_data = filtered_map_data[filtered_map_data["organisms.organism"].apply(
             lambda organism_str: any(org in organism_str.split(", ") for org in selected_organisms)
         )]
 
     if selected_common_names:
-        filtered_map_data = filtered_map_data[filtered_map_data["common_name"].apply(
+        filtered_map_data = filtered_map_data[filtered_map_data["organisms.common_name"].apply(
             lambda common_name_str: any(name in common_name_str.split(", ") for name in selected_common_names)
         )]
 
@@ -756,10 +801,10 @@ def build_table(click_flag_value, selected_data, click_data, selected_organisms,
     # checklist selection
     if not click_flag_value:
         if selected_organisms:
-            filtered_df = filtered_df[filtered_df["organism"].isin(selected_organisms)]
+            filtered_df = filtered_df[filtered_df["organisms.organism"].isin(selected_organisms)]
 
         if selected_common_names:
-            filtered_df = filtered_df[filtered_df["common_name"].isin(selected_common_names)]
+            filtered_df = filtered_df[filtered_df["organisms.common_name"].isin(selected_common_names)]
 
         if selected_current_status:
             filtered_df = filtered_df[filtered_df["current_status"].isin(selected_current_status)]
@@ -769,18 +814,17 @@ def build_table(click_flag_value, selected_data, click_data, selected_organisms,
 
     # we have to do the gouping again because of the unnesting of raw_data which is a repeated record - array of structs
     # see BigQuery metadata schema
-    grouped_df = filtered_df.groupby(['geotag', 'biosample_id']).agg({
-        'experiment_type': lambda x: ', '.join(set(filter(None, x))),
+    grouped_df = filtered_df.groupby(['geotag', 'organisms.biosample_id']).agg({
+        "experiment_type": lambda x: ", ".join(set(str(i).strip() for i in x if pd.notna(i))),
         'common_name': 'first',
         'current_status': 'first',
         'symbionts_status': 'first',
-        'organism': 'first',
-        'kingdom_scientific_name': 'first',
+        'organisms.organism': 'first',
     }).reset_index()
 
-    grouped_df["biosample_link"] = grouped_df["biosample_id"].apply(
+    grouped_df["biosample_link"] = grouped_df["organisms.biosample_id"].apply(
         lambda x: f"[{x}](https://portal.darwintreeoflife.org/organism/{x})")
-    grouped_df["organism_link"] = grouped_df["organism"].apply(
+    grouped_df["organism_link"] = grouped_df["organisms.organism"].apply(
         lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
 
     # pagination
