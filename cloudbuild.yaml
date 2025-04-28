@@ -1,12 +1,12 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'europe-west1-docker.pkg.dev/prj-ext-prod-biodiv-data-in/dash-repo/dash-app', '.']
+    args: ['build', '-t', 'europe-west2-docker.pkg.dev/prj-ext-prod-biodiv-data-in/dash-repo/dash-app', '.']
 
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'europe-west1-docker.pkg.dev/prj-ext-prod-biodiv-data-in/dash-repo/dash-app']
+    args: ['push', 'europe-west2-docker.pkg.dev/prj-ext-prod-biodiv-data-in/dash-repo/dash-app']
 
 images:
-  - 'europe-west1-docker.pkg.dev/prj-ext-prod-biodiv-data-in/dash-repo/dash-app'
+  - 'europe-west2-docker.pkg.dev/prj-ext-prod-biodiv-data-in/dash-repo/dash-app'
 
 options:
   logging: CLOUD_LOGGING_ONLY
