@@ -29,73 +29,152 @@ PROJECT_PARQUET_MAP = {
 }
 
 
-def load_data(project_name):
-    if project_name not in DATASETS:
-        gcs_path = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
-        with fs.open(gcs_path) as f:
-            df_nested = pd.read_parquet(f, engine="pyarrow")
+def extract_unique_protocols(raw_data_entry):
+    if isinstance(raw_data_entry, (list, np.ndarray)):
+        protocols = {
+            item.get('library_construction_protocol')
+            for item in raw_data_entry
+            if isinstance(item, dict) and item.get('library_construction_protocol')
+        }
+        return ','.join(protocols) if protocols else None
+    return None
 
-        df_exploded = df_nested.explode('organisms').reset_index(drop=True)
 
-        organisms_df = pd.json_normalize(df_exploded['organisms'].dropna(), sep='.')
+# Preload ALL projects at app startup
+for project_name, gcs_path in PROJECT_PARQUET_MAP.items():
+    print(f"Loading data for project: {project_name}")
 
-        # add prefix
-        organisms_df.columns = [f'organisms.{col}' for col in organisms_df.columns]
+    with fs.open(gcs_path) as f:
+        df_nested = pd.read_parquet(f, engine="pyarrow")
 
-        df = pd.concat([df_exploded.drop(columns=['organisms']), organisms_df], axis=1)
+    df_exploded = df_nested.explode('organisms').reset_index(drop=True)
 
-        def extract_unique_protocols(raw_data_entry):
-            if isinstance(raw_data_entry, (list, np.ndarray)):
-                protocols = {
-                    item.get('library_construction_protocol')
-                    for item in raw_data_entry
-                    if isinstance(item, dict) and item.get('library_construction_protocol')
-                }
-                return ','.join(protocols) if protocols else None
-            return None
+    organisms_df = pd.json_normalize(df_exploded['organisms'].dropna(), sep='.')
 
-        if 'raw_data' in df.columns:
-            df['experiment_type'] = df['raw_data'].apply(extract_unique_protocols)
+    # add prefix
+    organisms_df.columns = [f'organisms.{col}' for col in organisms_df.columns]
 
-        df['experiment_type'] = df['experiment_type'].str.split(',')
+    df = pd.concat([df_exploded.drop(columns=['organisms']), organisms_df], axis=1)
 
-        df['experiment_type'] = df['experiment_type'].apply(
-            lambda x: [str(item) for item in x] if isinstance(x, list) else []
-        )
-        # explode the experiment_type so that we have a row for each experiment_type
-        df = df.explode('experiment_type').reset_index(drop=True)
+    # Extract experiment_type
+    if 'raw_data' in df.columns:
+        df['experiment_type'] = df['raw_data'].apply(extract_unique_protocols)
 
-        # process dataframe data
-        df["lat"] = pd.to_numeric(df["organisms.latitude"], errors='coerce')
-        df["lon"] = pd.to_numeric(df["organisms.longitude"], errors='coerce')
-        df = df[(df["lat"].between(-90, 90)) & (df["lon"].between(-180, 180))]
-        df["geotag"] = df["lat"].astype(str) + "," + df["lon"].astype(str)
-        df["Kingdom"] = df["phylogenetic_tree"].apply(
-            lambda x: x.get("kingdom", {}).get("scientific_name") if isinstance(x, dict) else None
-        )
-        df["biosample_link"] = df["organisms.biosample_id"].apply(
-            lambda x: f"[{x}](https://portal.darwintreeoflife.org/organism/{x})")
-        df["organism_link"] = df["organisms.organism"].apply(
-            lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
+    df['experiment_type'] = df['experiment_type'].str.split(',')
+    df['experiment_type'] = df['experiment_type'].apply(
+        lambda x: [str(item) for item in x] if isinstance(x, list) else []
+    )
 
-        # group by 'geotag' and aggregate data
-        grouped_data = df.groupby("geotag").agg({
-            "lat": "first",
-            "lon": "first",
-            "organisms.biosample_id": lambda x: ", ".join(set(filter(None, x))),
-            "organisms.organism": lambda x: ", ".join(set(filter(None, x))),
-            "organisms.common_name": lambda x: ", ".join(set(filter(None, x))),
-            "organisms.sex": lambda x: ", ".join(set(filter(None, x))),
-            "organisms.organism_part": lambda x: ", ".join(set(filter(None, x))),
-            "Kingdom": lambda x: ", ".join(set(filter(None, x))),
-            "current_status": lambda x: ", ".join(set(filter(None, x))),
-            "experiment_type": lambda x: ", ".join(set(str(i).strip() for i in x if pd.notna(i))),
-        }).reset_index()
+    # Explode the experiment_type so that we have a row for each experiment_type
+    df = df.explode('experiment_type').reset_index(drop=True)
 
-        grouped_data["Record Count"] = df.groupby("geotag")["organisms.biosample_id"].nunique().values
+    # Clean coordinates
+    df["lat"] = pd.to_numeric(df["organisms.latitude"], errors='coerce')
+    df["lon"] = pd.to_numeric(df["organisms.longitude"], errors='coerce')
+    df = df[(df["lat"].between(-90, 90)) & (df["lon"].between(-180, 180))]
 
-        DATASETS[project_name] = {"df_data": df, "grouped_data": grouped_data}
-    return DATASETS[project_name]
+    # Add extra columns
+    df["geotag"] = df["lat"].astype(str) + "," + df["lon"].astype(str)
+    df["Kingdom"] = df["phylogenetic_tree"].apply(
+        lambda x: x.get("kingdom", {}).get("scientific_name") if isinstance(x, dict) else None
+    )
+    df["biosample_link"] = df["organisms.biosample_id"].apply(
+        lambda x: f"[{x}](https://portal.darwintreeoflife.org/organism/{x})"
+    )
+    df["organism_link"] = df["organisms.organism"].apply(
+        lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})"
+    )
+
+    # Grouped aggregation
+    grouped_data = df.groupby("geotag").agg({
+        "lat": "first",
+        "lon": "first",
+        "organisms.biosample_id": lambda x: ", ".join(set(filter(None, x))),
+        "organisms.organism": lambda x: ", ".join(set(filter(None, x))),
+        "organisms.common_name": lambda x: ", ".join(set(filter(None, x))),
+        "organisms.sex": lambda x: ", ".join(set(filter(None, x))),
+        "organisms.organism_part": lambda x: ", ".join(set(filter(None, x))),
+        "Kingdom": lambda x: ", ".join(set(filter(None, x))),
+        "current_status": lambda x: ", ".join(set(filter(None, x))),
+        "experiment_type": lambda x: ", ".join(set(str(i).strip() for i in x if pd.notna(i))),
+    }).reset_index()
+
+    grouped_data["Record Count"] = df.groupby("geotag")["organisms.biosample_id"].nunique().values
+
+    # Save in global dict
+    DATASETS[project_name] = {"df_data": df, "grouped_data": grouped_data}
+
+print("✅ All datasets loaded at startup.")
+
+# def load_data(project_name):
+#     if project_name not in DATASETS:
+#         gcs_path = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
+#         with fs.open(gcs_path) as f:
+#             df_nested = pd.read_parquet(f, engine="pyarrow")
+#
+#         # df_nested = pd.read_parquet('/Users/yroochun/Projects/dtol-plotly/DTOL/fe/pages/metadata_dtol.parquet')
+#
+#         df_exploded = df_nested.explode('organisms').reset_index(drop=True)
+#
+#         organisms_df = pd.json_normalize(df_exploded['organisms'].dropna(), sep='.')
+#
+#         # add prefix
+#         organisms_df.columns = [f'organisms.{col}' for col in organisms_df.columns]
+#
+#         df = pd.concat([df_exploded.drop(columns=['organisms']), organisms_df], axis=1)
+#
+#         def extract_unique_protocols(raw_data_entry):
+#             if isinstance(raw_data_entry, (list, np.ndarray)):
+#                 protocols = {
+#                     item.get('library_construction_protocol')
+#                     for item in raw_data_entry
+#                     if isinstance(item, dict) and item.get('library_construction_protocol')
+#                 }
+#                 return ','.join(protocols) if protocols else None
+#             return None
+#
+#         if 'raw_data' in df.columns:
+#             df['experiment_type'] = df['raw_data'].apply(extract_unique_protocols)
+#
+#         df['experiment_type'] = df['experiment_type'].str.split(',')
+#
+#         df['experiment_type'] = df['experiment_type'].apply(
+#             lambda x: [str(item) for item in x] if isinstance(x, list) else []
+#         )
+#         # explode the experiment_type so that we have a row for each experiment_type
+#         df = df.explode('experiment_type').reset_index(drop=True)
+#
+#         # process dataframe data
+#         df["lat"] = pd.to_numeric(df["organisms.latitude"], errors='coerce')
+#         df["lon"] = pd.to_numeric(df["organisms.longitude"], errors='coerce')
+#         df = df[(df["lat"].between(-90, 90)) & (df["lon"].between(-180, 180))]
+#         df["geotag"] = df["lat"].astype(str) + "," + df["lon"].astype(str)
+#         df["Kingdom"] = df["phylogenetic_tree"].apply(
+#             lambda x: x.get("kingdom", {}).get("scientific_name") if isinstance(x, dict) else None
+#         )
+#         df["biosample_link"] = df["organisms.biosample_id"].apply(
+#             lambda x: f"[{x}](https://portal.darwintreeoflife.org/organism/{x})")
+#         df["organism_link"] = df["organisms.organism"].apply(
+#             lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
+#
+#         # group by 'geotag' and aggregate data
+#         grouped_data = df.groupby("geotag").agg({
+#             "lat": "first",
+#             "lon": "first",
+#             "organisms.biosample_id": lambda x: ", ".join(set(filter(None, x))),
+#             "organisms.organism": lambda x: ", ".join(set(filter(None, x))),
+#             "organisms.common_name": lambda x: ", ".join(set(filter(None, x))),
+#             "organisms.sex": lambda x: ", ".join(set(filter(None, x))),
+#             "organisms.organism_part": lambda x: ", ".join(set(filter(None, x))),
+#             "Kingdom": lambda x: ", ".join(set(filter(None, x))),
+#             "current_status": lambda x: ", ".join(set(filter(None, x))),
+#             "experiment_type": lambda x: ", ".join(set(str(i).strip() for i in x if pd.notna(i))),
+#         }).reset_index()
+#
+#         grouped_data["Record Count"] = df.groupby("geotag")["organisms.biosample_id"].nunique().values
+#
+#         DATASETS[project_name] = {"df_data": df, "grouped_data": grouped_data}
+#     return DATASETS[project_name]
 
 
 def layout(**kwargs):
@@ -487,7 +566,8 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                       checklist_selection_order, project_name):
     user_selection = False
 
-    data = load_data(project_name)["df_data"]
+    # data = load_data(project_name)["df_data"]
+    data = DATASETS[project_name]["df_data"]
 
     all_organisms = sorted(data["organisms.organism"].unique())
     all_common_names = sorted(data["organisms.common_name"].unique())
@@ -669,7 +749,8 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
 )
 def build_map(selected_organisms, selected_common_names, selected_current_status, selected_experiment_types,
               project_name):
-    filtered_map_data = load_data(project_name)["grouped_data"]
+    # filtered_map_data = load_data(project_name)["grouped_data"]
+    filtered_map_data = DATASETS[project_name]["grouped_data"]
 
     if selected_organisms:
         filtered_map_data = filtered_map_data[filtered_map_data["organisms.organism"].apply(
@@ -778,7 +859,8 @@ def update_click_flag(click_data, selected_organisms, selected_common_names, sel
 )
 def build_table(click_flag_value, selected_data, click_data, selected_organisms, selected_common_names,
                 selected_current_status, selected_experiment_types, page_current, page_size, project_name):
-    data = load_data(project_name)["df_data"]
+    # data = load_data(project_name)["df_data"]
+    data = DATASETS[project_name]["df_data"]
     print(f"click_flag_value: {click_flag_value}")
     filtered_df = data
 
