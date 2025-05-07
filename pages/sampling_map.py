@@ -552,7 +552,7 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
         for i, value in enumerate(selected_values):
             for target_key in targets:
                 lookup_key = f"{source_field}_to_{target_key}"
-                result = lookup_tables[lookup_key].get(lookup_key, set())
+                result = lookup_tables.get(lookup_key, {}).get(value, set())
                 if i == 0:
                     allowed_sets[target_key] &= result
                 else:
