@@ -464,10 +464,11 @@ def clear_checklists(clear_org_clicks, clear_common_clicks, clear_status_clicks,
     )
 
 
-def create_options(options_list, allowed_options=None):
-    return_list = [{"label": option, "value": option, "disabled": False}
-                   for option in options_list]
-    if allowed_options:
+def create_options(options_list, display_all=True,  allowed_options=set()):
+    if display_all:
+        return_list = [{"label": option, "value": option, "disabled": False}
+                       for option in options_list]
+    else:
         return_list = [{"label": option, "value": option}
                        for option in options_list if option in allowed_options
                        ]
@@ -604,10 +605,10 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
     allowed_experiment_type = allowed_sets["experiment_type"]
 
     if user_selection:
-        organism_options = create_options(all_values['all_organisms'], allowed_orgs)
-        common_name_options = create_options(all_values['all_common_names'], allowed_common)
-        current_status_options = create_options(all_values['all_current_status'], allowed_current_status)
-        experiment_type_options = create_options(all_values['all_experiment_type'], allowed_experiment_type)
+        organism_options = create_options(all_values['all_organisms'], False, allowed_orgs)
+        common_name_options = create_options(all_values['all_common_names'], False, allowed_common)
+        current_status_options = create_options(all_values['all_current_status'], False, allowed_current_status)
+        experiment_type_options = create_options(all_values['all_experiment_type'], False, allowed_experiment_type)
 
     organism_options.sort(key=lambda x: (x["value"] not in (selected_organisms or [])))
     common_name_options.sort(key=lambda x: (x["value"] not in (selected_common_names or [])))
