@@ -56,16 +56,6 @@ def load_data(project_name):
 
         df = pd.concat([df_exploded.drop(columns=['organisms']), organisms_df], axis=1)
 
-        def extract_unique_protocols(raw_data_entry):
-            if isinstance(raw_data_entry, (list, np.ndarray)):
-                protocols = {
-                    item.get('library_construction_protocol')
-                    for item in raw_data_entry
-                    if isinstance(item, dict) and item.get('library_construction_protocol')
-                }
-                return ','.join(protocols) if protocols else None
-            return None
-
         if 'raw_data' in df.columns:
             df['experiment_type'] = df['raw_data'].apply(extract_unique_protocols)
 
@@ -85,8 +75,6 @@ def load_data(project_name):
         df["Kingdom"] = df["phylogenetic_tree"].apply(
             lambda x: x.get("kingdom", {}).get("scientific_name") if isinstance(x, dict) else None
         )
-        df["biosample_link"] = df["organisms.biosample_id"].apply(
-            lambda x: f"[{x}](https://portal.darwintreeoflife.org/organism/{x})")
         df["organism_link"] = df["organisms.organism"].apply(
             lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
 
@@ -99,12 +87,15 @@ def load_data(project_name):
             "organisms.common_name": lambda x: ", ".join(set(filter(None, x))),
             "organisms.sex": lambda x: ", ".join(set(filter(None, x))),
             "organisms.organism_part": lambda x: ", ".join(set(filter(None, x))),
-            "Kingdom": lambda x: ", ".join(set(filter(None, x))),
+            "Kingdom": lambda x: list(set(filter(None, x))),
             "current_status": lambda x: ", ".join(set(filter(None, x))),
             "experiment_type": lambda x: ", ".join(set(str(i).strip() for i in x if pd.notna(i))),
         }).reset_index()
 
-        grouped_data["Record Count"] = df.groupby("geotag")["organisms.biosample_id"].nunique().values
+        grouped_data["Record Count"] = df.groupby("geotag")["organisms.organism"].nunique().values
+
+        # explode to get a row for each geotag-kingdom
+        grouped_data = grouped_data.explode("Kingdom").reset_index(drop=True)
 
         DATASETS[project_name] = {"df_data": df, "grouped_data": grouped_data}
 
@@ -141,7 +132,7 @@ def layout(**kwargs):
                             dbc.Input(
                                 id="search-organism",
                                 type="text",
-                                placeholder="Search organism",
+                                placeholder="Scientific Name",
                                 style={"borderRadius": "20px 0 0 20px", "backgroundColor": "#f1f3f4"}
                             ),
                             dbc.Button(
@@ -184,16 +175,13 @@ def layout(**kwargs):
                             "maxHeight": "260px"
                         })
                     )
-                ])
-            ], style={
-                "maxHeight": "300px",
-                "overflow": "hidden",
-                "border": "1px solid #dee2e6",
-                "borderRadius": "5px",
-                "padding": "10px",
-                "backgroundColor": "#f8f9fa",
-                "flex": "1"
-            }),
+                ], style={
+                    "border": "1px solid #dee2e6",
+                    "borderRadius": "5px",
+                    "padding": "10px",
+                    "backgroundColor": "#f8f9fa"
+                })
+            ], width=6, style={"paddingRight": "20px"}),  # Added padding on the right side of the first column
 
             dbc.Col([
                 html.Div([
@@ -202,7 +190,7 @@ def layout(**kwargs):
                             dbc.Input(
                                 id="search-common-name",
                                 type="text",
-                                placeholder="Search Common Name",
+                                placeholder="Common Name",
                                 style={"borderRadius": "20px 0 0 20px", "backgroundColor": "#f1f3f4"}
                             ),
                             dbc.Button(
@@ -245,17 +233,14 @@ def layout(**kwargs):
                             "maxHeight": "260px"
                         })
                     )
-                ])
-            ], style={
-                "maxHeight": "300px",
-                "overflow": "hidden",
-                "border": "1px solid #dee2e6",
-                "borderRadius": "5px",
-                "padding": "10px",
-                "backgroundColor": "#f8f9fa",
-                "flex": "1"
-            }),
-        ], className="mb-4", style={"display": "flex", "gap": "20px", "marginTop": "20px"}),
+                ], style={
+                    "border": "1px solid #dee2e6",
+                    "borderRadius": "5px",
+                    "padding": "10px",
+                    "backgroundColor": "#f8f9fa"
+                })
+            ], width=6, style={"paddingLeft": "20px"}),  # Added padding on the left side of the second column
+        ], className="mb-4", style={"marginTop": "20px", "width": "100%", "padding": "0"}),
 
         # map + left-side filters (current status and experiment type)
         dbc.Row([
@@ -343,7 +328,7 @@ def layout(**kwargs):
                                 style={"display": "flex", "flexDirection": "column", "gap": "7px"},
                                 labelStyle={"display": "flex", "alignItems": "center", "gap": "5px"}
                             )
-                        ], style={"overflowY": "auto", "maxHeight": "260px"})
+                        ], style={"overflowY": "auto", "maxHeight": "420px"})
                     )
                 ], style={
                     "border": "1px solid #dee2e6",
@@ -359,6 +344,7 @@ def layout(**kwargs):
             )
         ], className="mb-4", style={"marginTop": "20px"}),
 
+        # data table
         dbc.Row(dbc.Col(
             dcc.Loading(
                 id="loading-datatable",
@@ -367,7 +353,6 @@ def layout(**kwargs):
                 children=dash_table.DataTable(
                     id="datatable-paging",
                     columns=[
-                        {"name": "BioSample ID", "id": "biosample_link", "presentation": "markdown"},
                         {"name": "Scientific Name", "id": "organism_link", "presentation": "markdown"},
                         {"name": "Common Name", "id": "common_name"},
                         {"name": "Current Status", "id": "current_status"},
@@ -384,7 +369,6 @@ def layout(**kwargs):
             ), md=12, id="col-table"),
             style={"marginTop": "20px", "marginBottom": "20px"}
         )
-
     ])
 
 
@@ -480,6 +464,16 @@ def clear_checklists(clear_org_clicks, clear_common_clicks, clear_status_clicks,
     )
 
 
+def create_options(options_list, allowed_options=None):
+    return_list = [{"label": option, "value": option, "disabled": False}
+                   for option in options_list]
+    if allowed_options:
+        return_list = [{"label": option, "value": option}
+                       for option in options_list if option in allowed_options
+                       ]
+    return return_list
+
+
 @callback(
     Output("current-status-checklist", "options"),
     Output("common-name-checklist", "options"),
@@ -503,61 +497,37 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
     user_selection = False
     data = DATASETS[project_name]["df_data"]
 
-    all_organisms = sorted(data["organisms.organism"].unique())
-    all_common_names = sorted(data["organisms.common_name"].unique())
-    all_current_status = sorted(data["current_status"].unique())
-    all_experiment_type = sorted(
-        str(v).strip() for v in data["experiment_type"].unique() if pd.notna(v)
-    )
-
-    # filter by search
-    if search_organism:
-        all_organisms = [org for org in all_organisms if search_organism.lower() in org.lower()]
-
-    if search_common_name:
-        all_common_names = [name for name in all_common_names if search_common_name.lower() in name.lower()]
-
-    if search_current_status:
-        all_current_status = [status for status in all_current_status if
-                              search_current_status.lower() in status.lower()]
-
-    if search_experiment_type:
-        all_experiment_type = [exp_type for exp_type in all_experiment_type if search_experiment_type.lower()
-                               in exp_type.lower()]
-
-    grouped = {
-        col: data.groupby(col)[["organisms.organism", "organisms.common_name", "current_status", "experiment_type"]].agg(
-            lambda x: set(x))
-        for col in ["organisms.organism", "organisms.common_name", "current_status", "experiment_type"]
+    all_values = {
+        "all_organisms": sorted(data["organisms.organism"].unique()),
+        "all_common_names": sorted(data["organisms.common_name"].unique()),
+        "all_current_status": sorted(data["current_status"].unique()),
+        "all_experiment_type": sorted(str(v).strip() for v in data["experiment_type"].unique() if pd.notna(v)),
     }
 
-    org_to_common = grouped["organisms.organism"]["organisms.common_name"].to_dict()
-    org_to_current_status = grouped["organisms.organism"]["current_status"].to_dict()
-    org_to_experiment_type = grouped["organisms.organism"]["experiment_type"].to_dict()
+    search_map = {
+        "all_organisms": search_organism,
+        "all_common_names": search_common_name,
+        "all_current_status": search_current_status,
+        "all_experiment_type": search_experiment_type,
+    }
 
-    common_to_org = grouped["organisms.common_name"]["organisms.organism"].to_dict()
-    common_to_current_status = grouped["organisms.common_name"]["current_status"].to_dict()
-    common_to_experiment_type = grouped["organisms.common_name"]["experiment_type"].to_dict()
+    # filter by search
+    for key, search in search_map.items():
+        if search:
+            all_values[key] = [v for v in all_values[key] if search.lower() in v.lower()]
 
-    status_to_org = grouped["current_status"]["organisms.organism"].to_dict()
-    status_to_common_name = grouped["current_status"]["organisms.common_name"].to_dict()
-    status_to_experiment_type = grouped["current_status"]["experiment_type"].to_dict()
+    fields = ["organisms.organism", "organisms.common_name", "current_status", "experiment_type"]
+    grouped = {col: data.groupby(col)[fields].agg(lambda x: set(x)) for col in fields}
 
-    experiment_type_to_org = grouped["experiment_type"]["organisms.organism"].to_dict()
-    experiment_type_to_common_name = grouped["experiment_type"]["organisms.common_name"].to_dict()
-    experiment_type_to_status = grouped["experiment_type"]["current_status"].to_dict()
+    lookup_tables = {
+        f"{src}_to_{tgt}": grouped[src][tgt].to_dict()
+        for src in fields for tgt in fields if src != tgt
+    }
 
-    organism_options = [{"label": org, "value": org, "disabled": False}
-                        for org in all_organisms]
-
-    common_name_options = [{"label": name, "value": name, "disabled": False}
-                           for name in all_common_names]
-
-    current_status_options = [{"label": status, "value": status, "disabled": False}
-                              for status in all_current_status]
-
-    experiment_type_options = [{"label": exp_type, "value": exp_type, "disabled": False}
-                               for exp_type in all_experiment_type]
+    organism_options = create_options(all_values['all_organisms'])
+    common_name_options = create_options(all_values['all_common_names'])
+    current_status_options = create_options(all_values['all_current_status'])
+    experiment_type_options = create_options(all_values['all_experiment_type'])
 
     print("checklist_selection_order ---> ", checklist_selection_order)
 
@@ -573,101 +543,76 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
     if selections_list and len(selections_list) > 0:
         user_selection = True
 
-    allowed_orgs = set(all_organisms)
-    allowed_common = set(all_common_names)
-    allowed_current_status = set(all_current_status)
-    allowed_experiment_type = set(all_experiment_type)
+    allowed_orgs = set(all_values['all_organisms'])
+    allowed_common = set(all_values['all_common_names'])
+    allowed_current_status = set(all_values['all_current_status'])
+    allowed_experiment_type = set(all_values['all_experiment_type'])
+
+    def calculate_allowed_options(selected_values, source_field, targets, lookup_tables, allowed_sets):
+        for i, value in enumerate(selected_values):
+            for target_key in targets:
+                lookup_key = f"{source_field}_to_{target_key}"
+                result = lookup_tables[lookup_key].get(lookup_key, set())
+                if i == 0:
+                    allowed_sets[target_key] &= result
+                else:
+                    allowed_sets[target_key].update(result)
+
+    selection_configs = {
+        "selected_organisms": {
+            "values": selected_organisms,
+            "source_field": "organisms.organism",
+            "targets": ["organisms.common_name", "current_status", "experiment_type"],
+        },
+        "selected_common_names": {
+            "values": selected_common_names,
+            "source_field": "organisms.common_name",
+            "targets": ["organisms.organism", "current_status", "experiment_type"],
+        },
+        "selected_current_status": {
+            "values": selected_current_status,
+            "source_field": "current_status",
+            "targets": ["organisms.organism", "organisms.common_name", "experiment_type"],
+        },
+        "selected_experiment_type": {
+            "values": selected_experiment_type,
+            "source_field": "experiment_type",
+            "targets": ["organisms.organism", "organisms.common_name", "current_status"],
+        },
+    }
+
+    allowed_sets = {
+        "organisms.organism": allowed_orgs,
+        "organisms.common_name": allowed_common,
+        "current_status": allowed_current_status,
+        "experiment_type": allowed_experiment_type,
+    }
 
     for selection in selections_list:
-        if selection == 'selected_organisms':
-            for i, org in enumerate(selected_organisms):
-                common = org_to_common.get(org, set())
-                current_status = org_to_current_status.get(org, set())
-                exp_type = org_to_experiment_type.get(org, set())
-                if i == 0:
-                    allowed_common = allowed_common & common
-                    allowed_current_status = allowed_current_status & current_status
-                    allowed_experiment_type = allowed_experiment_type & exp_type
-                else:
-                    allowed_common.update(common)
-                    allowed_current_status.update(current_status)
-                    allowed_experiment_type.update(exp_type)
+        config = selection_configs[selection]
+        calculate_allowed_options(
+            config["values"],
+            config["source_field"],
+            config["targets"],
+            lookup_tables,
+            allowed_sets
+        )
 
-        elif selection == 'selected_common_names':
-            for i, name in enumerate(selected_common_names):
-                orgs = common_to_org.get(name, set())
-                current_status = common_to_current_status.get(name, set())
-                exp_type = common_to_experiment_type.get(name, set())
-                if i == 0:
-                    allowed_orgs = allowed_orgs & orgs
-                    allowed_current_status = allowed_current_status & current_status
-                    allowed_experiment_type = allowed_experiment_type & exp_type
-                else:
-                    allowed_orgs.update(orgs)
-                    allowed_current_status.update(current_status)
-                    allowed_experiment_type.update(exp_type)
-
-        elif selection == 'selected_current_status':
-            for i, status in enumerate(selected_current_status):
-                orgs = status_to_org.get(status, set())
-                common = status_to_common_name.get(status, set())
-                exp_type = status_to_experiment_type.get(status, set())
-
-                if i == 0:
-                    allowed_orgs = allowed_orgs & orgs
-                    allowed_common = allowed_common & common
-                    allowed_experiment_type = allowed_experiment_type & exp_type
-                else:
-                    allowed_orgs.update(orgs)
-                    allowed_common.update(common)
-                    allowed_experiment_type.update(exp_type)
-
-        elif selection == 'selected_experiment_type':
-            for i, exp_type in enumerate(selected_experiment_type):
-                orgs = experiment_type_to_org.get(exp_type, set())
-                common = experiment_type_to_common_name.get(exp_type, set())
-                status = experiment_type_to_status.get(exp_type, set())
-
-                if i == 0:
-                    allowed_orgs = allowed_orgs & orgs
-                    allowed_common = allowed_common & common
-                    allowed_current_status = allowed_current_status & status
-                else:
-                    allowed_orgs.update(orgs)
-                    allowed_common.update(common)
-                    allowed_current_status.update(status)
+    allowed_orgs = allowed_sets["organisms.organism"]
+    allowed_common = allowed_sets["organisms.common_name"]
+    allowed_current_status = allowed_sets["current_status"]
+    allowed_experiment_type = allowed_sets["experiment_type"]
 
     if user_selection:
-        organism_options = [
-            {"label": org, "value": org, "disabled": org not in allowed_orgs} if allowed_orgs
-            else {"label": org, "value": org, "disabled": True}
-            for org in all_organisms
-        ]
+        organism_options = create_options(all_values['all_organisms'], allowed_orgs)
+        common_name_options = create_options(all_values['all_common_names'], allowed_common)
+        current_status_options = create_options(all_values['all_current_status'], allowed_current_status)
+        experiment_type_options = create_options(all_values['all_experiment_type'], allowed_experiment_type)
 
-        common_name_options = [
-            {"label": name, "value": name, "disabled": name not in allowed_common} if allowed_common
-            else {"label": name, "value": name, "disabled": True}
-            for name in all_common_names
-        ]
-
-        current_status_options = [
-            {"label": status, "value": status,
-             "disabled": status not in allowed_current_status} if allowed_current_status
-            else {"label": status, "value": status, "disabled": True}
-            for status in all_current_status
-        ]
-
-        experiment_type_options = [
-            {"label": exp_type, "value": exp_type,
-             "disabled": exp_type not in allowed_experiment_type} if allowed_experiment_type
-            else {"label": exp_type, "value": exp_type, "disabled": True}
-            for exp_type in all_experiment_type
-        ]
-
-    organism_options.sort(key=lambda x: (x["value"] not in (selected_organisms or []), x["disabled"]))
-    common_name_options.sort(key=lambda x: (x["value"] not in (selected_common_names or []), x["disabled"]))
-    current_status_options.sort(key=lambda x: (x["value"] not in (selected_current_status or []), x["disabled"]))
-    experiment_type_options.sort(key=lambda x: (x["value"] not in (selected_experiment_type or []), x["disabled"]))
+    organism_options.sort(key=lambda x: (x["value"] not in (selected_organisms or [])))
+    common_name_options.sort(key=lambda x: (x["value"] not in (selected_common_names or [])))
+    current_status_options.sort(key=lambda x: (x["value"] not in (selected_current_status or [])))
+    experiment_type_options.sort(key=lambda x: (x["value"] not in (selected_experiment_type or [])))
 
     return current_status_options, common_name_options, organism_options, experiment_type_options
 
@@ -831,10 +776,17 @@ def build_table(click_flag_value, selected_data, click_data, selected_organisms,
         'organisms.organism': 'first',
     }).reset_index()
 
-    grouped_df["biosample_link"] = grouped_df["organisms.biosample_id"].apply(
-        lambda x: f"[{x}](https://portal.darwintreeoflife.org/organism/{x})")
     grouped_df["organism_link"] = grouped_df["organisms.organism"].apply(
         lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
+
+    grouped_df = grouped_df.drop_duplicates(subset=[
+        "organism_link",
+        "common_name",
+        "current_status",
+        "symbionts_status"
+    ])
+
+    grouped_df = grouped_df.sort_values(by="current_status", ascending=True)
 
     # pagination
     total_pages = max(math.ceil(len(grouped_df) / page_size), 1)
