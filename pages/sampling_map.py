@@ -6,9 +6,9 @@ import plotly.express as px
 import google.auth
 from gcsfs import GCSFileSystem
 import dash
-from dash import dcc, callback, Output, Input, dash_table, State, no_update, html, ctx
+import fsspec
+from dash import dcc, callback, Output, Input, dash_table, State, no_update, html, ctx, callback_context
 import dash_bootstrap_components as dbc
-
 
 dash.register_page(
     __name__,
@@ -23,10 +23,10 @@ DATASETS = {}
 
 # map project to parquet file path
 PROJECT_PARQUET_MAP = {
-    "dtol": "python_dash_data_bucket/metadata_dtol.parquet",
-    "erga": "python_dash_data_bucket/metadata_erga.parquet",
-    "asg": "python_dash_data_bucket/metadata_asg.parquet",
-    "gbdp": "python_dash_data_bucket/metadata_gbdp.parquet"
+    "dtol": "python_dash_data_bucket/metadata_dtol*.parquet",
+    "erga": "python_dash_data_bucket/metadata_erga*.parquet",
+    "asg": "python_dash_data_bucket/metadata_asg*.parquet",
+    "gbdp": "python_dash_data_bucket/metadata_gbdp*.parquet"
 }
 
 
@@ -43,9 +43,22 @@ def extract_unique_protocols(raw_data_entry):
 
 def load_data(project_name):
     if project_name not in DATASETS:
-        gcs_path = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
-        with fs.open(gcs_path) as f:
-            df_nested = pd.read_parquet(f, engine="pyarrow")
+        gcs_pattern = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
+
+        fs = fsspec.filesystem("gcs")
+
+        matching_files = fs.glob(gcs_pattern)
+
+        if not matching_files:
+            raise FileNotFoundError(f"No Parquet files found for pattern: {gcs_pattern}")
+
+        # read all parquet files
+        df_nested = pd.concat(
+            pd.read_parquet(fs.open(file), engine="pyarrow") for file in matching_files
+        )
+
+        # with fs.open(gcs_path) as f:
+        #     df_nested = pd.read_parquet(f, engine="pyarrow")
 
         df_exploded = df_nested.explode('organisms').reset_index(drop=True)
 
@@ -125,8 +138,21 @@ def layout(**kwargs):
         dcc.Store(id="project-store", data=project_name),
 
         # checklist section
-        dbc.Row([
-            dbc.Col([
+        html.Div([
+            # Reset Button
+            html.Div(
+                dbc.Button(
+                    "Reset All",
+                    id="reset-all-button",
+                    color="danger",
+                    className="mb-3"
+                ),
+                style={"display": "flex", "justifyContent": "flex-end", "marginBottom": "10px"}
+            ),
+
+            # Horizontal checklists
+            html.Div([
+                # Scientific Name Checklist
                 html.Div([
                     html.Div([
                         dbc.InputGroup([
@@ -180,11 +206,14 @@ def layout(**kwargs):
                     "border": "1px solid #dee2e6",
                     "borderRadius": "5px",
                     "padding": "10px",
-                    "backgroundColor": "#f8f9fa"
-                })
-            ], width=6, style={"paddingRight": "20px"}),  # Added padding on the right side of the first column
+                    "backgroundColor": "#f8f9fa",
+                    "flex": "1"
+                }),
 
-            dbc.Col([
+                # spacer
+                html.Div(style={"width": "20px"}),
+
+                # Common Name Checklist
                 html.Div([
                     html.Div([
                         dbc.InputGroup([
@@ -238,10 +267,19 @@ def layout(**kwargs):
                     "border": "1px solid #dee2e6",
                     "borderRadius": "5px",
                     "padding": "10px",
-                    "backgroundColor": "#f8f9fa"
+                    "backgroundColor": "#f8f9fa",
+                    "flex": "1"
                 })
-            ], width=6, style={"paddingLeft": "20px"}),  # Added padding on the left side of the second column
-        ], className="mb-4", style={"marginTop": "20px", "width": "100%", "padding": "0"}),
+            ], style={
+                "display": "flex",
+                "flexDirection": "row",
+                "gap": "20px"
+            })
+        ], style={
+            "marginTop": "20px",
+            "marginBottom": "20px"
+        }),
+
 
         # map + left-side filters (current status and experiment type)
         dbc.Row([
@@ -415,6 +453,7 @@ def update_selection_order(org_val, common_val, status_val, exp_val, current_ord
     Output("search-common-name", "value"),
     Output("search-current-status", "value"),
     Output("search-experiment-type", "value"),
+
     Input("clear-organism", "n_clicks"),
     Input("clear-common-name", "n_clicks"),
     Input("clear-current-status", "n_clicks"),
@@ -465,7 +504,7 @@ def clear_checklists(clear_org_clicks, clear_common_clicks, clear_status_clicks,
     )
 
 
-def create_options(options_list, display_all=True,  allowed_options=set()):
+def create_options(options_list, display_all=True, allowed_options=set()):
     if display_all:
         return_list = [{"label": option, "value": option, "disabled": False}
                        for option in options_list]
@@ -474,6 +513,33 @@ def create_options(options_list, display_all=True,  allowed_options=set()):
                        for option in options_list if option in allowed_options
                        ]
     return return_list
+
+
+@callback(
+    Output("organism-checklist", "value", allow_duplicate=True),
+    Output("common-name-checklist", "value", allow_duplicate=True),
+    Output("current-status-checklist", "value", allow_duplicate=True),
+    Output("experiment-type-checklist", "value", allow_duplicate=True),
+    Output("search-organism", "value", allow_duplicate=True),
+    Output("search-common-name", "value", allow_duplicate=True),
+    Output("search-current-status", "value", allow_duplicate=True),
+    Output("search-experiment-type", "value", allow_duplicate=True),
+    Output("map-click-flag", "data", allow_duplicate=True),
+    Output("map-selection-flag", "data", allow_duplicate=True),
+    Output("prev-click-data", "data", allow_duplicate=True),
+    Output("sampling-map", "clickData", allow_duplicate=True),
+    Output("sampling-map", "selectedData", allow_duplicate=True),
+    Output("checklist-selection-order", "data", allow_duplicate=True),
+
+    Input("reset-all-button", "n_clicks"),
+    prevent_initial_call=True
+)
+def reset_all(n_clicks):
+    return (
+        [], [], [], [],  # checklist values
+        "", "", "", "",  # search inputs
+        False, False, None, None, None, []  # map flags, clickData
+    )
 
 
 @callback(
@@ -491,13 +557,31 @@ def create_options(options_list, display_all=True,  allowed_options=set()):
     Input("search-current-status", "value"),
     Input("search-experiment-type", "value"),
     Input("checklist-selection-order", "data"),
-    Input("project-store", "data")
+    Input("project-store", "data"),
+
+    Input("map-click-flag", "data"),  # determines if triggered by map click or checklist
+    Input("map-selection-flag", "data"),  # determines if triggered by map selection or checklist
+    Input("sampling-map", "selectedData"),
+    Input("sampling-map", "clickData"),
 )
 def update_checklists(selected_organisms, selected_common_names, selected_current_status, selected_experiment_type,
                       search_organism, search_common_name, search_current_status, search_experiment_type,
-                      checklist_selection_order, project_name):
+                      checklist_selection_order, project_name,
+                      click_flag_value, selection_flag_value, selected_data, click_data):
     user_selection = False
     data = DATASETS[project_name]["df_data"]
+
+    # map click
+    if click_flag_value or selection_flag_value:
+        selected_geotags = set()
+        if selection_flag_value and selected_data:
+            selected_geotags.update(point["hovertext"] for point in selected_data["points"])
+        if click_flag_value and click_data:
+            selected_geotags.update(point["hovertext"] for point in click_data["points"])
+
+        # filter data based on geotags
+        if selected_geotags:
+            data = data[data["geotag"].isin(selected_geotags)]
 
     all_values = {
         "all_organisms": sorted(data["organisms.organism"].unique()),
@@ -701,6 +785,7 @@ def build_map(selected_organisms, selected_common_names, selected_current_status
     Output("map-click-flag", "data"),
     Output("prev-click-data", "data"),
     Output("map-selection-flag", "data"),
+
     Input("sampling-map", "clickData"),
     Input("sampling-map", "selectedData"),
     Input("organism-checklist", "value"),
@@ -708,21 +793,37 @@ def build_map(selected_organisms, selected_common_names, selected_current_status
     Input("current-status-checklist", "value"),
     Input("experiment-type-checklist", "value"),
     State("prev-click-data", "data"),
+    Input("clear-organism", "n_clicks"),
+    Input("clear-common-name", "n_clicks"),
+    Input("clear-current-status", "n_clicks"),
+    Input("clear-experiment-type", "n_clicks"),
     prevent_initial_call=True
 )
 def update_click_flag(click_data, selected_data, selected_organisms, selected_common_names, selected_current_status,
-                      selected_experiment_types, prev_click_data):
+                      selected_experiment_types, prev_click_data,
+                      clear_org_clicks, clear_common_clicks, clear_status_clicks, clear_experiment_type_clicks):
+
+    triggered_id = callback_context.triggered[0]["prop_id"].split(".")[0]
+    checklist_ids = {
+        "organism-checklist",
+        "common-name-checklist",
+        "current-status-checklist",
+        "experiment-type-checklist",
+    }
+
+    checklist_interaction = triggered_id in checklist_ids
+
+    if triggered_id.startswith("clear-"):
+        return False, None, False
+
     # checklist filters selected
-    if selected_organisms or selected_common_names or selected_current_status or selected_experiment_types:
-        print("Checklist selected, resetting flag to False.")
-        return False, prev_click_data, False
+    if checklist_interaction:
+        return False, None, False
 
     if click_data and click_data != prev_click_data:
-        print("New map click detected, setting flag to True.")
         return True, click_data, False
 
     if selected_data and selected_data != prev_click_data:
-        print("New map selection detected, setting flag to True.")
         return False, selected_data, True
 
     return no_update, prev_click_data, no_update
@@ -745,7 +846,8 @@ def update_click_flag(click_data, selected_data, selected_organisms, selected_co
     Input('datatable-paging', "page_size"),
     Input("project-store", "data")
 )
-def build_table(click_flag_value, selection_flag_value, selected_data, click_data, selected_organisms, selected_common_names,
+def build_table(click_flag_value, selection_flag_value, selected_data, click_data, selected_organisms,
+                selected_common_names,
                 selected_current_status, selected_experiment_types, page_current, page_size, project_name):
     data = DATASETS[project_name]["df_data"]
     print(f"click_flag_value: {click_flag_value}")
@@ -764,18 +866,17 @@ def build_table(click_flag_value, selection_flag_value, selected_data, click_dat
             filtered_df = data[data["geotag"].isin(selected_geotags)]
 
     # checklist selection
-    if not click_flag_value and not selection_flag_value:
-        if selected_organisms:
-            filtered_df = filtered_df[filtered_df["organisms.organism"].isin(selected_organisms)]
+    if selected_organisms:
+        filtered_df = filtered_df[filtered_df["organisms.organism"].isin(selected_organisms)]
 
-        if selected_common_names:
-            filtered_df = filtered_df[filtered_df["organisms.common_name"].isin(selected_common_names)]
+    if selected_common_names:
+        filtered_df = filtered_df[filtered_df["organisms.common_name"].isin(selected_common_names)]
 
-        if selected_current_status:
-            filtered_df = filtered_df[filtered_df["current_status"].isin(selected_current_status)]
+    if selected_current_status:
+        filtered_df = filtered_df[filtered_df["current_status"].isin(selected_current_status)]
 
-        if selected_experiment_types:
-            filtered_df = filtered_df[filtered_df["experiment_type"].isin(selected_experiment_types)]
+    if selected_experiment_types:
+        filtered_df = filtered_df[filtered_df["experiment_type"].isin(selected_experiment_types)]
 
     # we have to do the gouping again because of the unnesting of raw_data which is a repeated record - array of structs
     # see BigQuery metadata schema
