@@ -136,6 +136,7 @@ def layout(**kwargs):
         dcc.Store(id="prev-click-data", data=None),
         dcc.Store(id="checklist-selection-order", data=[]),
         dcc.Store(id="project-store", data=project_name),
+        dcc.Store(id="selected-geotags", data=[]),
 
         # checklist section
         html.Div([
@@ -280,6 +281,11 @@ def layout(**kwargs):
             "marginBottom": "20px"
         }),
 
+        html.Div(
+            id="map-selection-alert",
+            children=[],
+            style={"marginBottom": "20px"}
+        ),
 
         # map + left-side filters (current status and experiment type)
         dbc.Row([
@@ -445,6 +451,23 @@ def update_selection_order(org_val, common_val, status_val, exp_val, current_ord
 
 
 @callback(
+    Output("map-selection-alert", "children"),
+    Input("selected-geotags", "data"),
+)
+def update_map_selection_alert(selected_geotags):
+    if selected_geotags:
+        return dbc.Alert(
+            f"{len(selected_geotags)} point(s) selected on the map — checklist filters are being applied *within* "
+            f"this region.",
+            color="info",
+            dismissable=True,
+            is_open=True,
+            style={"marginTop": "10px"}
+        )
+    return []
+
+
+@callback(
     Output("organism-checklist", "value"),
     Output("common-name-checklist", "value"),
     Output("current-status-checklist", "value"),
@@ -530,6 +553,7 @@ def create_options(options_list, display_all=True, allowed_options=set()):
     Output("sampling-map", "clickData", allow_duplicate=True),
     Output("sampling-map", "selectedData", allow_duplicate=True),
     Output("checklist-selection-order", "data", allow_duplicate=True),
+    Output("selected-geotags", "data", allow_duplicate=True),
 
     Input("reset-all-button", "n_clicks"),
     prevent_initial_call=True
@@ -538,7 +562,8 @@ def reset_all(n_clicks):
     return (
         [], [], [], [],  # checklist values
         "", "", "", "",  # search inputs
-        False, False, None, None, None, []  # map flags, clickData
+        False, False, None, None, None, # map flags, clickData
+        [], []  # selected chklist, geotags stores
     )
 
 
@@ -563,25 +588,18 @@ def reset_all(n_clicks):
     Input("map-selection-flag", "data"),  # determines if triggered by map selection or checklist
     Input("sampling-map", "selectedData"),
     Input("sampling-map", "clickData"),
+    Input("selected-geotags", "data"),
 )
 def update_checklists(selected_organisms, selected_common_names, selected_current_status, selected_experiment_type,
                       search_organism, search_common_name, search_current_status, search_experiment_type,
                       checklist_selection_order, project_name,
-                      click_flag_value, selection_flag_value, selected_data, click_data):
+                      click_flag_value, selection_flag_value, selected_data, click_data, selected_geotags):
     user_selection = False
     data = DATASETS[project_name]["df_data"]
 
     # map click
-    if click_flag_value or selection_flag_value:
-        selected_geotags = set()
-        if selection_flag_value and selected_data:
-            selected_geotags.update(point["hovertext"] for point in selected_data["points"])
-        if click_flag_value and click_data:
-            selected_geotags.update(point["hovertext"] for point in click_data["points"])
-
-        # filter data based on geotags
-        if selected_geotags:
-            data = data[data["geotag"].isin(selected_geotags)]
+    if selected_geotags:
+        data = data[data["geotag"].isin(selected_geotags)]
 
     all_values = {
         "all_organisms": sorted(data["organisms.organism"].unique()),
@@ -709,11 +727,15 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
     Input("common-name-checklist", "value"),
     Input("current-status-checklist", "value"),
     Input("experiment-type-checklist", "value"),
-    Input("project-store", "data")
+    Input("project-store", "data"),
+    Input("selected-geotags", "data")
 )
 def build_map(selected_organisms, selected_common_names, selected_current_status, selected_experiment_types,
-              project_name):
+              project_name, selected_geotags):
     filtered_map_data = DATASETS[project_name]["grouped_data"]
+
+    if selected_geotags:
+        filtered_map_data = filtered_map_data[filtered_map_data["geotag"].isin(selected_geotags)]
 
     if selected_organisms:
         filtered_map_data = filtered_map_data[filtered_map_data["organisms.organism"].apply(
@@ -785,6 +807,7 @@ def build_map(selected_organisms, selected_common_names, selected_current_status
     Output("map-click-flag", "data"),
     Output("prev-click-data", "data"),
     Output("map-selection-flag", "data"),
+    Output("selected-geotags", "data"),
 
     Input("sampling-map", "clickData"),
     Input("sampling-map", "selectedData"),
@@ -814,19 +837,21 @@ def update_click_flag(click_data, selected_data, selected_organisms, selected_co
     checklist_interaction = triggered_id in checklist_ids
 
     if triggered_id.startswith("clear-"):
-        return False, None, False
+        return False, None, False, no_update
 
     # checklist filters selected
     if checklist_interaction:
-        return False, None, False
+        return False, None, False, no_update
 
     if click_data and click_data != prev_click_data:
-        return True, click_data, False
+        selected_geotags = [point["hovertext"] for point in click_data["points"]]
+        return True, click_data, False, selected_geotags
 
     if selected_data and selected_data != prev_click_data:
-        return False, selected_data, True
+        selected_geotags = [point["hovertext"] for point in selected_data["points"]]
+        return False, selected_data, True, selected_geotags
 
-    return no_update, prev_click_data, no_update
+    return no_update, prev_click_data, no_update, no_update
 
 
 @callback(
@@ -844,26 +869,21 @@ def update_click_flag(click_data, selected_data, selected_organisms, selected_co
     Input("experiment-type-checklist", "value"),
     Input('datatable-paging', "page_current"),
     Input('datatable-paging', "page_size"),
-    Input("project-store", "data")
+    Input("project-store", "data"),
+    Input("selected-geotags", "data")
 )
 def build_table(click_flag_value, selection_flag_value, selected_data, click_data, selected_organisms,
-                selected_common_names,
-                selected_current_status, selected_experiment_types, page_current, page_size, project_name):
+                selected_common_names, selected_current_status, selected_experiment_types, page_current, page_size,
+                project_name, selected_geotags):
     data = DATASETS[project_name]["df_data"]
     print(f"click_flag_value: {click_flag_value}")
     filtered_df = data
 
-    # map click
-    if click_flag_value or selection_flag_value:
-        selected_geotags = set()
-        if selection_flag_value and selected_data:
-            selected_geotags.update(point["hovertext"] for point in selected_data["points"])
-        if click_flag_value and click_data:
-            selected_geotags.update(point["hovertext"] for point in click_data["points"])
 
-        # filter data based on geotags
-        if selected_geotags:
-            filtered_df = data[data["geotag"].isin(selected_geotags)]
+
+    # map click
+    if selected_geotags:
+        filtered_df = filtered_df[filtered_df["geotag"].isin(selected_geotags)]
 
     # checklist selection
     if selected_organisms:
