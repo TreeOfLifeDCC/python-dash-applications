@@ -63,12 +63,9 @@ def load_data(project_name):
         # organisms repeated record
         df_exploded = df_nested.explode('organisms').reset_index(drop=True)
         organisms_df = pd.json_normalize(df_exploded['organisms'].dropna(), sep='.')
+        # add prefix
         organisms_df.columns = [f'organisms.{col}' for col in organisms_df.columns]
-        organisms_df_full = pd.DataFrame(index=df_exploded.index, columns=organisms_df.columns)
-        organisms_df_full.loc[organisms_df.index] = organisms_df
-        df = pd.concat([df_exploded.drop(columns=['organisms']), organisms_df_full], axis=1)
-
-
+        df = pd.concat([df_exploded.drop(columns=['organisms']), organisms_df], axis=1)
 
         if 'raw_data' in df.columns:
             df['experiment_type'] = df['raw_data'].apply(extract_unique_protocols)

@@ -98,6 +98,30 @@ def generate_grouped_data(df, group_by_col):
     return grouped_data
 
 
+def preprocess_chunk(df_nested):
+    # organisms repeated record
+    df_exploded = df_nested.explode('organisms').reset_index(drop=True)
+    organisms_df = pd.json_normalize(df_exploded['organisms'].dropna(), sep='.')
+    organisms_df.columns = [f'organisms.{col}' for col in organisms_df.columns]
+    df_exploded = df_exploded.drop(columns=['organisms']).reset_index(drop=True)
+    df = pd.concat([df_exploded, organisms_df], axis=1)
+
+    # raw_data repeated record
+    df = df.explode('raw_data').reset_index(drop=True)
+    raw_data_df = pd.json_normalize(df['raw_data'].dropna(), sep='.')
+    raw_data_df.columns = [f'raw_data.{col}' for col in raw_data_df.columns]
+    df = df.drop(columns=['raw_data']).reset_index(drop=True)
+    df = pd.concat([df, raw_data_df], axis=1)
+
+    # latitude/longitude processing
+    df["lat"] = pd.to_numeric(df["organisms.latitude"], errors='coerce')
+    df["lon"] = pd.to_numeric(df["organisms.longitude"], errors='coerce')
+    df = df[(df["lat"].between(-90, 90)) & (df["lon"].between(-180, 180))]
+    df["geotag"] = df["lat"].astype(str) + "," + df["lon"].astype(str)
+
+    return df
+
+
 def load_data(project_name):
     if project_name not in DATASETS:
         DATASETS[project_name] = {}
@@ -108,49 +132,31 @@ def load_data(project_name):
         if not matching_files:
             raise FileNotFoundError(f"No Parquet files found for pattern: {gcs_pattern}")
 
-        # read all parquet files
-        df_nested = pd.concat(
-            pd.read_parquet(fs.open(file), engine="pyarrow") for file in matching_files
-        )
+        processed_chunks = []
+        for file in matching_files:
+            with fs.open(file) as f:
+                raw_df = pd.read_parquet(f, engine="pyarrow")
+                processed_df = preprocess_chunk(raw_df)
+                processed_chunks.append(processed_df)
 
-        # organisms repeated record
-        df_exploded = df_nested.explode('organisms').reset_index(drop=True)
-        organisms_df = pd.json_normalize(df_exploded['organisms'].dropna(), sep='.')
-        organisms_df.columns = [f'organisms.{col}' for col in organisms_df.columns]
-        organisms_df_full = pd.DataFrame(index=df_exploded.index, columns=organisms_df.columns)
-        organisms_df_full.loc[organisms_df.index] = organisms_df
-        df = pd.concat([df_exploded.drop(columns=['organisms']), organisms_df_full], axis=1)
-
-        # raw_data repeated record
-        df_raw_exploded = df.explode('raw_data').reset_index(drop=True)
-        raw_data_df = pd.json_normalize(df_raw_exploded['raw_data'].dropna(), sep='.')
-        raw_data_df.columns = [f'raw_data.{col}' for col in raw_data_df.columns]
-        raw_data_df_full = pd.DataFrame(index=df_raw_exploded.index, columns=raw_data_df.columns)
-        raw_data_df_full.loc[raw_data_df.index] = raw_data_df
-        df = pd.concat([df_raw_exploded.drop(columns=['raw_data']), raw_data_df_full], axis=1)
-
-        # process dataframe data
-        df["lat"] = pd.to_numeric(df["organisms.latitude"], errors='coerce')
-        df["lon"] = pd.to_numeric(df["organisms.longitude"], errors='coerce')
-        df = df[(df["lat"].between(-90, 90)) & (df["lon"].between(-180, 180))]
-        df["geotag"] = df["lat"].astype(str) + "," + df["lon"].astype(str)
+        final_df = pd.concat(processed_chunks, ignore_index=True)
 
         # for tab1 piecharts
-        df["sex"] = df["organisms.sex"].astype(str)
-        df["lifestage"] = df["organisms.lifestage"].astype(str)
-        df["habitat"] = df["organisms.habitat"].astype(str)
+        final_df["sex"] = final_df["organisms.sex"].astype(str)
+        final_df["lifestage"] = final_df["organisms.lifestage"].astype(str)
+        final_df["habitat"] = final_df["organisms.habitat"].astype(str)
 
         # for tab2 piecharts
-        df["instrument_platform"] = df["raw_data.instrument_platform"].astype(str)
-        df["instrument_model"] = df["raw_data.instrument_model"].astype(str)
-        df["library_construction_protocol"] = df["raw_data.library_construction_protocol"].astype(str)
+        final_df["instrument_platform"] = final_df["raw_data.instrument_platform"].astype(str)
+        final_df["instrument_model"] = final_df["raw_data.instrument_model"].astype(str)
+        final_df["library_construction_protocol"] = final_df["raw_data.library_construction_protocol"].astype(str)
 
         # Convert 'first_public' to datetime
-        df['first_public'] = pd.to_datetime(df['raw_data.first_public'], errors='coerce')
-        df["organism_link"] = df["organisms.organism"].apply(
+        final_df['first_public'] = pd.to_datetime(final_df['raw_data.first_public'], errors='coerce')
+        final_df["organism_link"] = final_df["organisms.organism"].apply(
             lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
 
-        DATASETS[project_name]["raw_data"] = df.copy()
+        DATASETS[project_name]["raw_data"] = final_df.copy()
 
 
 def build_pie(df, col_name, selected_val, type='piechart'):
