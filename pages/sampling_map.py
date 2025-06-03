@@ -3,9 +3,10 @@ import urllib
 import numpy as np
 import pandas as pd
 import plotly.express as px
-from google.cloud import storage
-import io
+import google.auth
+from gcsfs import GCSFileSystem
 import dash
+import fsspec
 from dash import dcc, callback, Output, Input, dash_table, State, no_update, html, ctx, callback_context
 import dash_bootstrap_components as dbc
 
@@ -15,6 +16,8 @@ dash.register_page(
     title="Sampling Map",
 )
 
+credentials, project = google.auth.default()
+fs = GCSFileSystem(token=credentials)
 
 DATASETS = {}
 
@@ -42,26 +45,17 @@ def load_data(project_name):
     if project_name not in DATASETS:
         gcs_pattern = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
 
-        bucket_name, prefix_pattern = gcs_pattern.split("/", 1)
+        fs = fsspec.filesystem("gcs")
 
-        prefix = prefix_pattern.replace("*", "")
+        matching_files = fs.glob(gcs_pattern)
 
-        client = storage.Client.create_anonymous_client()
-
-        blobs = client.list_blobs(bucket_name, prefix=prefix)
-
-        pieces = []
-        for blob in blobs:
-            if not blob.name.endswith(".parquet"):
-                continue
-            data = blob.download_as_bytes()
-            pieces.append(pd.read_parquet(io.BytesIO(data), engine="pyarrow"))
-
-        if not pieces:
-            raise FileNotFoundError(f"No Parquet files found in gs://{bucket_name}/{prefix_pattern}")
+        if not matching_files:
+            raise FileNotFoundError(f"No Parquet files found for pattern: {gcs_pattern}")
 
         # read all parquet files
-        df_nested = pd.concat(pieces, ignore_index=True)
+        df_nested = pd.concat(
+            pd.read_parquet(fs.open(file), engine="pyarrow") for file in matching_files
+        )
 
         # with fs.open(gcs_path) as f:
         #     df_nested = pd.read_parquet(f, engine="pyarrow")
