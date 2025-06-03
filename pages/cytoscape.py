@@ -39,13 +39,13 @@ PROJECT_PARQUET_MAP = {
 RANKS = ["kingdom", "phylum", "class", "order", "family", "genus", "species"]
 
 
-def make_markdown_link(sci_name: str) -> str:
-    quoted = quote(sci_name)
+def make_link(text: str, target: str) -> str:
     prefix = PORTAL_URL_PREFIX.get(PROJECT, "")
     if not prefix:
-        return sci_name
+        return text
+    quoted = quote(str(target))
     full_url = f"{prefix}{quoted}"
-    return f"[{sci_name}]({full_url})"
+    return f"[{text}]({full_url})"
 
 
 def build_taxonomy_tree(flat_records, ranks_order):
@@ -158,6 +158,7 @@ def load_data(project_name):
         prefix = rest.replace("*", "")
         client = storage.Client.create_anonymous_client()
         blobs = client.list_blobs(bucket, prefix=prefix)
+
         pieces = []
         for blob in blobs:
             if not blob.name.endswith(".parquet"):
@@ -172,9 +173,11 @@ def load_data(project_name):
                     "current_status",
                     "symbionts_status",
                     "phylogenetic_tree",
+                    "tax_id",
                 ]
             )
             pieces.append(df_chunk)
+
         if not pieces:
             raise FileNotFoundError(f"No parquet files in gs://{bucket}/{rest}")
         df = pd.concat(pieces, ignore_index=True)
@@ -192,6 +195,7 @@ def load_data(project_name):
             lambda t: extract_names(t, "common_name")
         )
         DATASETS[project_name] = df
+
     return DATASETS[project_name]
 
 
@@ -227,7 +231,11 @@ for row in all_rows:
     sci = row["Scientific name"]
     if ":" not in sci and sci not in ("Not Specified", "Eukaryota"):
         rec = next((r for r in records if r.get("scientific_name") == sci), {})
-        md_link = make_markdown_link(sci)
+        if PROJECT in ("erga", "gbdp"):
+            link_target = rec.get("tax_id", sci)
+        else:
+            link_target = sci
+        md_link = make_link(sci, link_target)
         table_rows.append({
             "Scientific name": md_link,
             "Common name": rec.get("common_name", ""),
@@ -512,7 +520,11 @@ def master(
         for r in leaf_rows:
             sci_plain = r["Scientific name"]
             rec = next((x for x in records if x["scientific_name"] == sci_plain), {})
-            md_link = make_markdown_link(sci_plain)
+            if PROJECT in ("erga", "gbdp"):
+                link_target = rec.get("tax_id", sci_plain)
+            else:
+                link_target = sci_plain
+            md_link = make_link(sci_plain, link_target)
             visible.append({
                 "Scientific name": md_link,
                 "Common name": rec.get("common_name", ""),
@@ -672,7 +684,11 @@ def master(
         if r["node_id"] in exp_ids and not nd_new[r["node_id"]]["children"]:
             sci_plain = r["Scientific name"]
             rec = next((x for x in filtered if x["scientific_name"] == sci_plain), {})
-            md_link = make_markdown_link(sci_plain)
+            if PROJECT in ("erga", "gbdp"):
+                link_target = rec.get("tax_id", sci_plain)
+            else:
+                link_target = sci_plain
+            md_link = make_link(sci_plain, link_target)
             visible.append({
                 "Scientific name": md_link,
                 "Common name": rec.get("common_name", ""),
