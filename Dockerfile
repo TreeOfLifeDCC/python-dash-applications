@@ -4,4 +4,4 @@ COPY . /app
 RUN pip install --quiet --no-cache-dir -r requirements.txt
 EXPOSE 80
 ENV PORT=80
-CMD ["gunicorn", "-b", "0.0.0.0:80", "--timeout", "120", "app:server"]
+CMD ["gunicorn", "-b", "0.0.0.0:80", "--timeout", "180", "app:server"]
