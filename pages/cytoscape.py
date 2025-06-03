@@ -87,19 +87,19 @@ def build_node_dict(node, node_dict=None):
     if node_dict is None:
         node_dict = {}
     node_dict[node["id"]] = node
-    for c in node.get("children", []):
-        build_node_dict(c, node_dict)
+    for child_node in node.get("children", []):
+        build_node_dict(child_node, node_dict)
     return node_dict
 
 
 def make_full_elements(tree):
     nodes, edges = [], []
 
-    def dfs(n):
-        nodes.append({"data": {"id": n["id"], "label": n["name"]}, "classes": "node"})
-        for c in n.get("children", []):
-            edges.append({"data": {"source": n["id"], "target": c["id"]}, "classes": "edge"})
-            dfs(c)
+    def dfs(node):
+        nodes.append({"data": {"id": node["id"], "label": node["name"]}, "classes": "node"})
+        for child_node in node.get("children", []):
+            edges.append({"data": {"source": node["id"], "target": child_node["id"]}, "classes": "edge"})
+            dfs(child_node)
 
     dfs(tree)
     return nodes + edges
@@ -116,28 +116,28 @@ def tree_to_table_rows(node, path=None):
             "node_id": node["id"],
         }
     ]
-    for c in node.get("children", []):
-        rows.extend(tree_to_table_rows(c, current))
+    for child_node in node.get("children", []):
+        rows.extend(tree_to_table_rows(child_node, current))
     return rows
 
 
 def tree_to_elements(node, expanded):
     elems = [{"data": {"id": node["id"], "label": node["name"]}, "classes": "node"}]
     if node["id"] in expanded:
-        for child in node.get("children", []):
+        for child_node in node.get("children", []):
             elems.append(
-                {"data": {"source": node["id"], "target": child["id"]}, "classes": "edge"}
+                {"data": {"source": node["id"], "target": child_node["id"]}, "classes": "edge"}
             )
-            elems.extend(tree_to_elements(child, expanded))
+            elems.extend(tree_to_elements(child_node, expanded))
     return elems
 
 
 def get_subtree_nodes(node_id, elements):
     children_map = {}
     for el in elements:
-        d = el["data"]
-        if "source" in d and "target" in d:
-            children_map.setdefault(d["source"], []).append(d["target"])
+        data = el["data"]
+        if "source" in data and "target" in data:
+            children_map.setdefault(data["source"], []).append(data["target"])
     subtree_ids, stack, visited = [], [node_id], set()
     while stack:
         curr = stack.pop()
@@ -218,8 +218,8 @@ all_com = sorted(
         if n and n.lower() != "not specified"
     }
 )
-checklist_options = [{"label": n, "value": n} for n in all_sci]
-common_options = [{"label": n, "value": n} for n in all_com]
+checklist_options = [{"label": name, "value": name} for name in all_sci]
+common_options = [{"label": name, "value": name} for name in all_com]
 
 tree = build_taxonomy_tree(records, RANKS)
 initial_expanded = [tree["id"]]
@@ -510,15 +510,15 @@ def master(
         elems = make_full_elements(tree_data)
         subs = get_subtree_nodes(node_id, elems)
         children_map = {}
-        for e in elems:
-            d = e["data"]
-            if "source" in d and "target" in d:
-                children_map.setdefault(d["source"], []).append(d["target"])
+        for el in elems:
+            data = el["data"]
+            if "source" in data and "target" in data:
+                children_map.setdefault(data["source"], []).append(data["target"])
         leaf_ids = [n for n in subs if not children_map.get(n)]
         leaf_rows = [r for r in tree_to_table_rows(tree_data) if r["node_id"] in leaf_ids]
         visible = []
-        for r in leaf_rows:
-            sci_plain = r["Scientific name"]
+        for row in leaf_rows:
+            sci_plain = row["Scientific name"]
             rec = next((x for x in records if x["scientific_name"] == sci_plain), {})
             if PROJECT in ("erga", "gbdp"):
                 link_target = rec.get("tax_id", sci_plain)
@@ -530,20 +530,30 @@ def master(
                 "Common name": rec.get("common_name", ""),
                 "Current Status": rec.get("current_status", ""),
                 "Symbionts Status": rec.get("symbionts_status", ""),
-                "Phylogeny": r["Phylogeny"]
+                "Phylogeny": row["Phylogeny"]
             })
-        recs = [
-            r for r in records
-            if r["scientific_name"] in {row["Scientific name"] for row in leaf_rows}
+        subtree_recs = [
+            rec for rec in records
+            if rec["scientific_name"] in {row["Scientific name"] for row in leaf_rows}
         ]
         sci_vals = sorted(
-            {s for r in recs for s in r["phylogenetic_tree_scientific_names"] if s.lower() != "not specified"}
+            {
+                sci_val
+                for record_data in subtree_recs
+                for sci_val in record_data["phylogenetic_tree_scientific_names"]
+                if sci_val.lower() != "not specified"
+            }
         )
         com_vals = sorted(
-            {c for r in recs for c in r["phylogenetic_tree_common_names"] if c.lower() != "not specified"}
+            {
+                common_val
+                for record_data in subtree_recs
+                for common_val in record_data["phylogenetic_tree_common_names"]
+                if common_val.lower() != "not specified"
+            }
         )
-        sci_opts = [{"label": s, "value": s} for s in sci_vals]
-        com_opts = [{"label": c, "value": c} for c in com_vals]
+        sci_opts = [{"label": sci_val, "value": sci_val} for sci_val in sci_vals]
+        com_opts = [{"label": common_val, "value": common_val} for common_val in com_vals]
         return com_opts, sci_opts, com_vals, sci_vals, no_update, visible, no_update, no_update
 
     ctx = callback_context.triggered[0]
@@ -670,9 +680,9 @@ def master(
     exp_ids = {new_tree["id"]}
     for rec in filtered:
         leaf = rec["scientific_name"]
-        for r in new_rows:
-            if r["Scientific name"] == leaf:
-                cur = r["node_id"]
+        for row in new_rows:
+            if row["Scientific name"] == leaf:
+                cur = row["node_id"]
                 while cur:
                     exp_ids.add(cur)
                     cur = nd_new[cur].get("parent")
@@ -680,9 +690,9 @@ def master(
     new_elems = tree_to_elements(new_tree, exp_ids)
 
     visible = []
-    for r in new_rows:
-        if r["node_id"] in exp_ids and not nd_new[r["node_id"]]["children"]:
-            sci_plain = r["Scientific name"]
+    for row in new_rows:
+        if row["node_id"] in exp_ids and not nd_new[row["node_id"]]["children"]:
+            sci_plain = row["Scientific name"]
             rec = next((x for x in filtered if x["scientific_name"] == sci_plain), {})
             if PROJECT in ("erga", "gbdp"):
                 link_target = rec.get("tax_id", sci_plain)
@@ -694,7 +704,7 @@ def master(
                 "Common name": rec.get("common_name", ""),
                 "Current Status": rec.get("current_status", ""),
                 "Symbionts Status": rec.get("symbionts_status", ""),
-                "Phylogeny": r["Phylogeny"]
+                "Phylogeny": row["Phylogeny"]
             })
 
     allowed_sci = {
@@ -711,8 +721,8 @@ def master(
     }
 
     return (
-        [{"label": c, "value": c} for c in sorted(allowed_com)],
-        [{"label": s, "value": s} for s in sorted(allowed_sci)],
+        [{"label": c_val, "value": c_val} for c_val in sorted(allowed_com)],
+        [{"label": s_val, "value": s_val} for s_val in sorted(allowed_sci)],
         common_sel,
         sci_sel,
         new_tree,

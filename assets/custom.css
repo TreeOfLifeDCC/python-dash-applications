@@ -20,65 +20,6 @@ input[type="checkbox"][disabled] {
   margin-bottom: 20px;
 }
 
-.filter-box {
-  background: #fff;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  box-shadow: 0 2px 4px rgba(0,0,0,0.08);
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  height: 400px;
-}
-
-.filter-selected {
-  font-style: italic;
-  color: #555;
-  margin-bottom: 8px;
-  flex: 0 0 auto;
-  overflow-y: auto;
-}
-
-.filter-label {
-  font-weight: 600;
-  font-size: 1.1rem;
-  margin-bottom: 8px;
-  flex: 0 0 auto;
-}
-
-.filter-header {
-  display: flex;
-  align-items: center;
-  margin-bottom: 8px;
-  flex: 0 0 auto;
-}
-
-.filter-input {
-  flex: 1 1 auto;
-  padding: 8px 12px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  font-size: 1rem;
-}
-
-.filter-clear {
-  margin-left: 12px;
-  padding: 8px 14px;
-  border: 1px solid #ccc;
-  border-radius: 4px;
-  background: #fff;
-  cursor: pointer;
-}
-
-.filter-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  margin: 0;
-  padding-left: 0;
-}
-
-.tree-container,
 .table-container {
   background: #fff;
   border: 1px solid #ddd;
@@ -86,13 +27,6 @@ input[type="checkbox"][disabled] {
   box-shadow: 0 2px 4px rgba(0,0,0,0.08);
   padding: 16px;
   margin-bottom: 20px;
-}
-
-.tree-container {
-  height: 600px;
-}
-
-.table-container {
   max-height: 400px;
   overflow: auto;
 }
