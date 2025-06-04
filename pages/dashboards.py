@@ -56,7 +56,8 @@ def limit_grouped_data(grouped_data, category, raw_data):
         }).reset_index()
 
         grouped_df["organism_link"] = grouped_df["organisms.organism"].apply(
-            lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})"
+            lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(str(x))})" if pd.notna(
+                x) else ""
         )
 
         grouped_df = grouped_df.drop_duplicates(subset=[
@@ -71,7 +72,6 @@ def limit_grouped_data(grouped_data, category, raw_data):
             category: "Others",
             "organisms.biosample_id": concat_unique(other_rows["organisms.biosample_id"]),
             "organisms.organism": concat_unique(other_rows["organisms.organism"]),
-            "organisms.common_name": concat_unique(other_rows["organisms.common_name"]),
             "organisms.sex": concat_unique(other_rows["organisms.sex"]),
             "current_status": concat_unique(other_rows["current_status"]),
             "Record Count": len(grouped_df),
@@ -87,7 +87,6 @@ def generate_grouped_data(df, group_by_col):
     grouped_data = df.groupby(group_by_col).agg({
         "organisms.biosample_id": lambda x: ", ".join(set(filter(None, x))),
         "organisms.organism": lambda x: ", ".join(set(filter(None, x))),
-        "organisms.common_name": lambda x: ", ".join(set(filter(None, x))),
         "organisms.sex": lambda x: ", ".join(set(filter(None, x))),
         "current_status": lambda x: ", ".join(set(filter(None, x))),
         "symbionts_status": lambda x: ", ".join(set(filter(None, x))),
@@ -113,12 +112,6 @@ def preprocess_chunk(df_nested):
     df = df.drop(columns=['raw_data']).reset_index(drop=True)
     df = pd.concat([df, raw_data_df], axis=1)
 
-    # latitude/longitude processing
-    df["lat"] = pd.to_numeric(df["organisms.latitude"], errors='coerce')
-    df["lon"] = pd.to_numeric(df["organisms.longitude"], errors='coerce')
-    df = df[(df["lat"].between(-90, 90)) & (df["lon"].between(-180, 180))]
-    df["geotag"] = df["lat"].astype(str) + "," + df["lon"].astype(str)
-
     return df
 
 
@@ -135,7 +128,10 @@ def load_data(project_name):
         processed_chunks = []
         for file in matching_files:
             with fs.open(file) as f:
-                raw_df = pd.read_parquet(f, engine="pyarrow")
+                raw_df = pd.read_parquet(f, columns=[
+                    "organisms", "raw_data", "current_status", "symbionts_status", "common_name"
+                ], engine="pyarrow")
+
                 processed_df = preprocess_chunk(raw_df)
                 processed_chunks.append(processed_df)
 
@@ -153,8 +149,11 @@ def load_data(project_name):
 
         # Convert 'first_public' to datetime
         final_df['first_public'] = pd.to_datetime(final_df['raw_data.first_public'], errors='coerce')
+
         final_df["organism_link"] = final_df["organisms.organism"].apply(
-            lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
+            lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(str(x))})" if pd.notna(
+                x) else ""
+        )
 
         DATASETS[project_name]["raw_data"] = final_df.copy()
 
@@ -405,6 +404,7 @@ def update_selection_text(selected):
 
     return parts[:-1] if parts else default_msg  # remove last " | "
 
+
 @callback(
     Output("rawdata-filter-selection", "children"),
     Input("rawdata-stored-selection", "data"),
@@ -566,7 +566,8 @@ def build_metadata_table(page_current, page_size, project_name, stored_selection
     }).reset_index()
 
     grouped_df["organism_link"] = grouped_df["organisms.organism"].apply(
-        lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})")
+        lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(str(x))})" if pd.notna(x) else ""
+    )
 
     grouped_df = grouped_df.drop_duplicates(subset=[
         "organism_link",
@@ -818,7 +819,7 @@ def build_rawdata_table(page_current, page_size, project_name, selected_pie_data
     }).reset_index()
 
     grouped_df["organism_link"] = grouped_df["organisms.organism"].apply(
-        lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(x)})"
+        lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(str(x))})" if pd.notna(x) else ""
     )
 
     grouped_df = grouped_df.drop_duplicates(subset=[
