@@ -247,210 +247,283 @@ for row in all_rows:
 
 header_colour = HEADER_COLOURS.get(PROJECT, "#f1f3f4")
 
-layout = html.Div(className="page-container", children=[
+layout = dbc.Container(
+    fluid=True,
+    style={"maxWidth": "1600px", "paddingTop": "20px", "paddingBottom": "20px"},
+    children=[
+        dbc.Row(
+            align="center",
+            className="mb-3",
+            children=[
+                dbc.Col(
+                    html.Div(
+                        [
+                            "• Single click: expand or collapse the node",
+                            html.Br(),
+                            "• Double click: display the leaves of the selected node’s branch in the table and "
+                            "show the corresponding filters"
+                        ],
+                        style={
+                            "fontSize": "16px",
+                            "fontWeight": "bold",
+                            "color": "#333",
+                            "backgroundColor": "#f0f0f0",
+                            "padding": "8px 12px",
+                            "borderRadius": "4px"
+                        }
+                    ),
+                    width=9
+                ),
+                dbc.Col(
+                    html.Button(
+                        "Reset All",
+                        id="reset-all",
+                        n_clicks=0,
+                        style={
+                            "backgroundColor": "#F28265",
+                            "color": "white",
+                            "border": "none",
+                            "borderRadius": "8px",
+                            "padding": "8px 16px",
+                            "fontSize": "14px",
+                            "cursor": "pointer"
+                        }
+                    ),
+                    width=3,
+                    style={"textAlign": "right"}
+                )
+            ]
+        ),
 
-    html.Div(
-        style={"display": "flex", "justifyContent": "flex-end", "marginBottom": "10px"},
-        children=[
-            html.Button(
-                "Reset All",
-                id="reset-all",
-                n_clicks=0,
-                style={
-                    "backgroundColor": "#F28265",
-                    "color": "white",
-                    "border": "none",
-                    "borderRadius": "8px",
-                    "padding": "8px 16px",
-                    "fontSize": "14px",
-                    "cursor": "pointer"
-                }
+        dbc.Row(
+            className="mb-4",
+            children=[
+                dbc.Col(
+                    [
+                        html.Div(
+                            style={
+                                "border": "1px solid #dee2e6",
+                                "borderRadius": "5px",
+                                "backgroundColor": "#f8f9fa",
+                                "padding": "10px"
+                            },
+                            children=[
+                                html.Div(
+                                    style={"backgroundColor": header_colour, "padding": "10px", "borderRadius": "5px"},
+                                    children=[
+                                        dbc.InputGroup(
+                                            [
+                                                dbc.Input(
+                                                    id="search-sci",
+                                                    type="text",
+                                                    placeholder="Phylogeny Scientific Name",
+                                                    style={
+                                                        "borderRadius": "20px 0 0 20px",
+                                                        "backgroundColor": "#f1f3f4"
+                                                    }
+                                                ),
+                                                dbc.Button(
+                                                    "Clear",
+                                                    id="clear-sci",
+                                                    color="dark",
+                                                    size="sm",
+                                                    style={
+                                                        "borderRadius": "0 20px 20px 0",
+                                                        "color": "#fff",
+                                                        "boxShadow": "0 0 4px rgba(0,0,0,0.3)"
+                                                    }
+                                                )
+                                            ]
+                                        )
+                                    ]
+                                ),
+                                dcc.Loading(
+                                    type="circle",
+                                    children=html.Div(
+                                        dcc.Checklist(
+                                            id="chk-sci",
+                                            options=checklist_options,
+                                            value=[],
+                                            inline=False,
+                                            style={"display": "flex", "flexDirection": "column", "gap": "7px"},
+                                            labelStyle={"display": "flex", "alignItems": "center", "gap": "5px"}
+                                        ),
+                                        style={"overflowY": "auto", "maxHeight": "260px", "marginTop": "8px"}
+                                    )
+                                )
+                            ]
+                        )
+                    ],
+                    md=6
+                ),
+
+                dbc.Col(
+                    [
+                        html.Div(
+                            style={
+                                "border": "1px solid #dee2e6",
+                                "borderRadius": "5px",
+                                "backgroundColor": "#f8f9fa",
+                                "padding": "10px"
+                            },
+                            children=[
+                                html.Div(
+                                    style={"backgroundColor": header_colour, "padding": "10px", "borderRadius": "5px"},
+                                    children=[
+                                        dbc.InputGroup(
+                                            [
+                                                dbc.Input(
+                                                    id="search-common",
+                                                    type="text",
+                                                    placeholder="Phylogeny Common Name",
+                                                    style={
+                                                        "borderRadius": "20px 0 0 20px",
+                                                        "backgroundColor": "#f1f3f4"
+                                                    }
+                                                ),
+                                                dbc.Button(
+                                                    "Clear",
+                                                    id="clear-common",
+                                                    color="dark",
+                                                    size="sm",
+                                                    style={
+                                                        "borderRadius": "0 20px 20px 0",
+                                                        "color": "#fff",
+                                                        "boxShadow": "0 0 4px rgba(0,0,0,0.3)"
+                                                    }
+                                                )
+                                            ]
+                                        )
+                                    ]
+                                ),
+                                dcc.Loading(
+                                    type="circle",
+                                    children=html.Div(
+                                        dcc.Checklist(
+                                            id="chk-common",
+                                            options=common_options,
+                                            value=[],
+                                            inline=False,
+                                            style={"display": "flex", "flexDirection": "column", "gap": "7px"},
+                                            labelStyle={"display": "flex", "alignItems": "center", "gap": "5px"}
+                                        ),
+                                        style={"overflowY": "auto", "maxHeight": "260px", "marginTop": "8px"}
+                                    )
+                                )
+                            ]
+                        )
+                    ],
+                    md=6
+                )
+            ]
+        ),
+
+        dbc.Row(
+            [
+                dbc.Col(
+                    cyto.Cytoscape(
+                        id="cytoscape-tree",
+                        elements=initial_elements,
+                        layout={
+                            "name": "breadthfirst",
+                            "directed": True,
+                            "padding": 10,
+                            "animate": True,
+                            "animationDuration": 500
+                        },
+                        style={"width": "100%", "height": "568px"},
+                        stylesheet=[
+                            {
+                                "selector": "node",
+                                "style": {
+                                    "label": "data(label)",
+                                    "background-color": header_colour,
+                                    "width": 60,
+                                    "height": 60,
+                                    "font-size": "14px",
+                                    "text-valign": "center",
+                                    "text-halign": "center"
+                                }
+                            },
+                            {
+                                "selector": "edge",
+                                "style": {
+                                    "line-color": "#A3C4BC",
+                                    "width": 1
+                                }
+                            }
+                        ]
+                    ),
+                    width=12
+                ),
+                dbc.Col(
+                    EventListener(
+                        id="cytoscape-listener",
+                        events=[
+                            {"event": "tap", "props": ["type", "target.id"]},
+                            {"event": "dblclick", "props": ["type", "target.id"]}
+                        ],
+                        logging=True
+                    ),
+                    width=0
+                )
+            ],
+            className="mb-3"
+        ),
+
+        dbc.Row(
+            dbc.Col(
+                html.Div(id="node-info", style={"fontWeight": "bold", "marginBottom": "10px"}),
+                width=12
             )
-        ]
-    ),
+        ),
 
-    html.Div(
-        className="filters-container",
-        style={"display": "flex", "gap": "20px", "marginBottom": "20px"},
-        children=[
-
-            html.Div(
-                style={
-                    "border": "1px solid #dee2e6",
-                    "borderRadius": "5px",
-                    "padding": "10px",
-                    "backgroundColor": "#f8f9fa",
-                    "flex": "1"
-                },
-                children=[
-                    html.Div(
-                        style={"backgroundColor": header_colour, "padding": "10px", "borderRadius": "5px"},
-                        children=[
-                            dbc.InputGroup([
-                                dbc.Input(
-                                    id="search-sci",
-                                    type="text",
-                                    placeholder="Phylogeny Scientific Name",
-                                    style={"borderRadius": "20px 0 0 20px", "backgroundColor": "#f1f3f4"}
-                                ),
-                                dbc.Button(
-                                    "Clear",
-                                    id="clear-sci",
-                                    color="dark",
-                                    size="sm",
-                                    style={
-                                        "borderRadius": "0 20px 20px 0",
-                                        "color": "#fff",
-                                        "boxShadow": "0 0 4px rgba(0,0,0,0.3)"
-                                    }
-                                )
-                            ])
-                        ]
-                    ),
-                    dcc.Loading(
-                        type="circle",
-                        children=html.Div(
-                            [
-                                dcc.Checklist(
-                                    id="chk-sci",
-                                    options=checklist_options,
-                                    value=[],
-                                    inline=False,
-                                    style={"display": "flex", "flexDirection": "column", "gap": "7px"},
-                                    labelStyle={"display": "flex", "alignItems": "center", "gap": "5px"}
-                                )
-                            ],
-                            style={"overflowY": "auto", "maxHeight": "260px"}
-                        )
-                    )
-                ]
-            ),
-
-            html.Div(
-                style={
-                    "border": "1px solid #dee2e6",
-                    "borderRadius": "5px",
-                    "padding": "10px",
-                    "backgroundColor": "#f8f9fa",
-                    "flex": "1"
-                },
-                children=[
-                    html.Div(
-                        style={"backgroundColor": header_colour, "padding": "10px", "borderRadius": "5px"},
-                        children=[
-                            dbc.InputGroup([
-                                dbc.Input(
-                                    id="search-common",
-                                    type="text",
-                                    placeholder="Phylogeny Common Name",
-                                    style={"borderRadius": "20px 0 0 20px", "backgroundColor": "#f1f3f4"}
-                                ),
-                                dbc.Button(
-                                    "Clear",
-                                    id="clear-common",
-                                    color="dark",
-                                    size="sm",
-                                    style={
-                                        "borderRadius": "0 20px 20px 0",
-                                        "color": "#fff",
-                                        "boxShadow": "0 0 4px rgba(0,0,0,0.3)"
-                                    }
-                                )
-                            ])
-                        ]
-                    ),
-                    dcc.Loading(
-                        type="circle",
-                        children=html.Div(
-                            [
-                                dcc.Checklist(
-                                    id="chk-common",
-                                    options=common_options,
-                                    value=[],
-                                    inline=False,
-                                    style={"display": "flex", "flexDirection": "column", "gap": "7px"},
-                                    labelStyle={"display": "flex", "alignItems": "center", "gap": "5px"}
-                                )
-                            ],
-                            style={"overflowY": "auto", "maxHeight": "260px"}
-                        )
-                    )
-                ]
-            ),
-        ]
-    ),
-
-    dcc.Store(id="filtered-tree", data=tree),
-    dcc.Store(id="expanded-store", data=initial_expanded),
-
-    cyto.Cytoscape(
-        id="cytoscape-tree",
-        elements=initial_elements,
-        layout={"name": "breadthfirst", "directed": True, "padding": 10, "animate": True, "animationDuration": 500},
-        style={"width": "100%", "height": "568px"},
-        stylesheet=[
-            {
-                "selector": "node",
-                "style": {
-                    "label": "data(label)",
-                    "background-color": header_colour,
-                    "width": 60,
-                    "height": 60,
-                    "font-size": "14px",
-                    "text-valign": "center",
-                    "text-halign": "center"
-                }
-            },
-            {
-                "selector": "edge",
-                "style": {
-                    "line-color": "#A3C4BC",
-                    "width": 1
-                }
-            }
-        ]
-    ),
-
-    EventListener(
-        id="cytoscape-listener",
-        events=[
-            {"event": "tap", "props": ["type", "target.id"]},
-            {"event": "dblclick", "props": ["type", "target.id"]}
-        ],
-        logging=True
-    ),
-
-    html.Div(id="node-info", style={"marginBottom": "10px", "fontWeight": "bold"}),
-
-    html.Div(
-        className="table-container",
-        children=[
-            dash_table.DataTable(
-                id="tree-table",
-                columns=[
-                    {
-                        "name": "Scientific name",
-                        "id": "Scientific name",
-                        "presentation": "markdown"
+        dbc.Row(
+            dbc.Col(
+                html.Div(
+                    style={
+                        "background": "#fff",
+                        "border": "1px solid #ddd",
+                        "borderRadius": "6px",
+                        "boxShadow": "0 2px 4px rgba(0,0,0,0.08)",
+                        "padding": "16px",
+                        "marginBottom": "20px",
+                        "maxHeight": "400px",
+                        "overflow": "auto"
                     },
-                    {"name": "Common name", "id": "Common name"},
-                    {"name": "Current Status", "id": "Current Status"},
-                    {"name": "Symbionts Status", "id": "Symbionts Status"},
-                    {"name": "Phylogeny", "id": "Phylogeny"},
-                ],
-                data=table_rows,
-                page_action="native",
-                sort_action="native",
-                sort_mode="single",
-                page_current=0,
-                page_size=10,
-                style_table={"overflowX": "auto"},
-                style_header={"backgroundColor": "#404040", "fontWeight": "bold", "color": "white"},
-                style_cell={"textAlign": "left", "padding": "5px"}
+                    children=[
+                        dash_table.DataTable(
+                            id="tree-table",
+                            columns=[
+                                {"name": "Scientific name", "id": "Scientific name", "presentation": "markdown"},
+                                {"name": "Common name", "id": "Common name"},
+                                {"name": "Current Status", "id": "Current Status"},
+                                {"name": "Symbionts Status", "id": "Symbionts Status"},
+                                {"name": "Phylogeny", "id": "Phylogeny"},
+                            ],
+                            data=table_rows,
+                            page_action="native",
+                            sort_action="none",
+                            page_current=0,
+                            page_size=10,
+                            style_table={"overflowX": "auto"},
+                            style_header={"backgroundColor": header_colour, "color": "black"},
+                            style_cell={"textAlign": "left", "padding": "5px"}
+                        )
+                    ]
+                ),
+                width=12
             )
-        ]
-    )
-])
+        ),
+
+        dbc.Row(
+            [
+                dbc.Col(dcc.Store(id="filtered-tree", data=tree), width=0),
+                dbc.Col(dcc.Store(id="expanded-store", data=initial_expanded), width=0)
+            ]
+        )
+    ]
+)
 
 
 @dash.callback(
