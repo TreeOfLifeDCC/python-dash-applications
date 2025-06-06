@@ -8,11 +8,9 @@ import pandas as pd
 from google.cloud import storage
 import io
 import dash_bootstrap_components as dbc
-from urllib.parse import quote
+from urllib.parse import quote, parse_qs
 
 dash.register_page(__name__, path="/cytoscape", name="Cytoscape Tree")
-
-PROJECT = "dtol"
 
 HEADER_COLOURS = {
     "dtol": "#8fbc45",
@@ -39,8 +37,8 @@ PROJECT_PARQUET_MAP = {
 RANKS = ["kingdom", "phylum", "class", "order", "family", "genus", "species"]
 
 
-def make_link(text: str, target: str) -> str:
-    prefix = PORTAL_URL_PREFIX.get(PROJECT, "")
+def make_link(text: str, project_name: str, target: str) -> str:
+    prefix = PORTAL_URL_PREFIX.get(project_name, "")
     if not prefix:
         return text
     quoted = quote(str(target))
@@ -183,124 +181,137 @@ def load_data(project_name):
         df = pd.concat(pieces, ignore_index=True)
 
         def extract_names(tree, field):
-            return [
-                tree.get(rank, {}).get(field, "Not Specified")
-                for rank in RANKS
-            ]
+            return [tree.get(rank, {}).get(field, "Not Specified") for rank in RANKS]
 
-        df["phylogenetic_tree_scientific_names"] = df["phylogenetic_tree"].apply(
-            lambda t: extract_names(t, "scientific_name")
-        )
-        df["phylogenetic_tree_common_names"] = df["phylogenetic_tree"].apply(
-            lambda t: extract_names(t, "common_name")
-        )
+        df["phylogenetic_tree_scientific_names"] = df["phylogenetic_tree"].apply(lambda t: extract_names(t, "scientific_name"))
+        df["phylogenetic_tree_common_names"] = df["phylogenetic_tree"].apply(lambda t: extract_names(t, "common_name"))
         DATASETS[project_name] = df
 
     return DATASETS[project_name]
 
 
-df = load_data(PROJECT)
-records = df.to_dict(orient="records")
+def init_project(project_name):
+    df = load_data(project_name)
+    records = df.to_dict(orient="records")
 
-all_sci = sorted(
-    {
-        n
-        for sub in df["phylogenetic_tree_scientific_names"]
-        for n in sub
-        if n and n.lower() != "not specified"
-    }
-)
-all_com = sorted(
-    {
-        n
-        for sub in df["phylogenetic_tree_common_names"]
-        for n in sub
-        if n and n.lower() != "not specified"
-    }
-)
-checklist_options = [{"label": name, "value": name} for name in all_sci]
-common_options = [{"label": name, "value": name} for name in all_com]
+    all_sci = sorted({
+        name
+        for subtree in df["phylogenetic_tree_scientific_names"]
+        for name in subtree
+        if name and name.lower() != "not specified"
+    })
+    all_com = sorted({
+        name
+        for subtree in df["phylogenetic_tree_common_names"]
+        for name in subtree
+        if name and name.lower() != "not specified"
+    })
+    sci_options = [{"label": name, "value": name} for name in all_sci]
+    com_options = [{"label": name, "value": name} for name in all_com]
 
-tree = build_taxonomy_tree(records, RANKS)
-initial_expanded = [tree["id"]]
-initial_elements = tree_to_elements(tree, initial_expanded)
+    tree = build_taxonomy_tree(records, RANKS)
+    full_tree_dict = tree
+    initial_expanded = [tree["id"]]
 
-all_rows = tree_to_table_rows(tree)
-table_rows = []
-for row in all_rows:
-    sci = row["Scientific name"]
-    if ":" not in sci and sci not in ("Not Specified", "Eukaryota"):
-        rec = next((r for r in records if r.get("scientific_name") == sci), {})
-        if PROJECT in ("erga", "gbdp"):
-            link_target = rec.get("tax_id", sci)
-        else:
-            link_target = sci
-        md_link = make_link(sci, link_target)
-        table_rows.append({
-            "Scientific name": md_link,
-            "Common name": rec.get("common_name", ""),
-            "Current Status": rec.get("current_status", ""),
-            "Symbionts Status": rec.get("symbionts_status", ""),
-            "Phylogeny": row["Phylogeny"],
-            "node_id": row["node_id"]
-        })
+    all_rows = tree_to_table_rows(tree)
+    rows_for_table = []
+    for row in all_rows:
+        sci = row["Scientific name"]
+        if ":" not in sci and sci not in ("Not Specified", "Eukaryota"):
+            rec = next((r for r in records if r.get("scientific_name") == sci), {})
+            link_target = rec.get("tax_id", sci) if project_name in ("erga", "gbdp") else sci
+            md_link = make_link(sci, project_name, link_target)
+            rows_for_table.append({
+                "Scientific name": md_link,
+                "Common name": rec.get("common_name", ""),
+                "Current Status": rec.get("current_status", ""),
+                "Symbionts Status": rec.get("symbionts_status", ""),
+                "Phylogeny": row["Phylogeny"],
+                "node_id": row["node_id"]
+            })
 
-header_colour = HEADER_COLOURS.get(PROJECT, "#f1f3f4")
+    elements = tree_to_elements(tree, initial_expanded)
 
-layout = dbc.Container(
-    fluid=True,
-    style={"maxWidth": "1600px", "paddingTop": "20px", "paddingBottom": "20px"},
-    children=[
-        dbc.Row(
-            align="center",
-            className="mb-3",
-            children=[
-                dbc.Col(
-                    html.Div(
-                        [
-                            "• Single click: expand or collapse the node",
-                            html.Br(),
-                            "• Double click: display the leaves of the selected node’s branch in the table and "
-                            "show the corresponding filters"
-                        ],
-                        style={
-                            "fontSize": "16px",
-                            "fontWeight": "bold",
-                            "color": "#333",
-                            "backgroundColor": "#f0f0f0",
-                            "padding": "8px 12px",
-                            "borderRadius": "4px"
-                        }
-                    ),
-                    width=9
-                ),
-                dbc.Col(
-                    html.Button(
-                        "Reset All",
-                        id="reset-all",
-                        n_clicks=0,
-                        style={
-                            "backgroundColor": "#F28265",
-                            "color": "white",
-                            "border": "none",
-                            "borderRadius": "8px",
-                            "padding": "8px 16px",
-                            "fontSize": "14px",
-                            "cursor": "pointer"
-                        }
-                    ),
-                    width=3,
-                    style={"textAlign": "right"}
-                )
-            ]
-        ),
+    color = HEADER_COLOURS.get(project_name, "#cccccc")
+    stylesheet = [
+        {
+            "selector": "node",
+            "style": {
+                "label": "data(label)",
+                "background-color": color,
+                "width": 60,
+                "height": 60,
+                "font-size": "14px",
+                "text-valign": "center",
+                "text-halign": "center"
+            }
+        },
+        {
+            "selector": "edge",
+            "style": {
+                "line-color": "#A3C4BC",
+                "width": 1
+            }
+        }
+    ]
 
-        dbc.Row(
-            className="mb-4",
-            children=[
-                dbc.Col(
-                    [
+    table_header_style = {"backgroundColor": color, "color": "black", "textAlign": "center"}
+    sci_filter_header_style = {"backgroundColor": color, "padding": "10px", "borderRadius": "5px"}
+    common_filter_header_style = {"backgroundColor": color, "padding": "10px", "borderRadius": "5px"}
+
+    return (
+        com_options,
+        sci_options,
+        [],
+        [],
+        full_tree_dict,
+        rows_for_table,
+        initial_expanded,
+        elements,
+        stylesheet,
+        table_header_style,
+        sci_filter_header_style,
+        common_filter_header_style
+    )
+
+
+layout = html.Div([
+    dcc.Location(id="url", refresh=False),
+    dcc.Store(id="project-store", data="dtol"),
+    dbc.Container(
+        fluid=True,
+        style={"maxWidth": "1600px", "paddingTop": "20px", "paddingBottom": "20px"},
+        children=[
+            dbc.Row(
+                align="center",
+                className="mb-3",
+                children=[
+                    dbc.Col(
                         html.Div(
+                            [
+                                "• Single click: expand or collapse the node",
+                                html.Br(),
+                                "• Double click: display the leaves of the selected node’s branch in the table and show the corresponding filters"
+                            ],
+                            style={
+                                "fontSize": "16px",
+                                "fontWeight": "bold",
+                                "color": "#333",
+                                "backgroundColor": "#f0f0f0",
+                                "padding": "8px 12px",
+                                "borderRadius": "4px"
+                            }
+                        ),
+                        width=12
+                    )
+                ]
+            ),
+            dbc.Row(
+                className="mb-4",
+                children=[
+                    dbc.Col(
+                        html.Div(
+                            id="sci-filter-container",
                             style={
                                 "border": "1px solid #dee2e6",
                                 "borderRadius": "5px",
@@ -309,7 +320,8 @@ layout = dbc.Container(
                             },
                             children=[
                                 html.Div(
-                                    style={"backgroundColor": header_colour, "padding": "10px", "borderRadius": "5px"},
+                                    id="sci-filter-header",
+                                    style={"backgroundColor": "#ffffff", "padding": "10px", "borderRadius": "5px"},
                                     children=[
                                         dbc.InputGroup(
                                             [
@@ -342,7 +354,7 @@ layout = dbc.Container(
                                     children=html.Div(
                                         dcc.Checklist(
                                             id="chk-sci",
-                                            options=checklist_options,
+                                            options=[],
                                             value=[],
                                             inline=False,
                                             style={"display": "flex", "flexDirection": "column", "gap": "7px"},
@@ -352,14 +364,12 @@ layout = dbc.Container(
                                     )
                                 )
                             ]
-                        )
-                    ],
-                    md=6
-                ),
-
-                dbc.Col(
-                    [
+                        ),
+                        md=6
+                    ),
+                    dbc.Col(
                         html.Div(
+                            id="common-filter-container",
                             style={
                                 "border": "1px solid #dee2e6",
                                 "borderRadius": "5px",
@@ -368,7 +378,8 @@ layout = dbc.Container(
                             },
                             children=[
                                 html.Div(
-                                    style={"backgroundColor": header_colour, "padding": "10px", "borderRadius": "5px"},
+                                    id="common-filter-header",
+                                    style={"backgroundColor": "#ffffff", "padding": "10px", "borderRadius": "5px"},
                                     children=[
                                         dbc.InputGroup(
                                             [
@@ -401,7 +412,7 @@ layout = dbc.Container(
                                     children=html.Div(
                                         dcc.Checklist(
                                             id="chk-common",
-                                            options=common_options,
+                                            options=[],
                                             value=[],
                                             inline=False,
                                             style={"display": "flex", "flexDirection": "column", "gap": "7px"},
@@ -411,125 +422,145 @@ layout = dbc.Container(
                                     )
                                 )
                             ]
-                        )
-                    ],
-                    md=6
-                )
-            ]
-        ),
-
-        dbc.Row(
-            [
-                dbc.Col(
-                    cyto.Cytoscape(
-                        id="cytoscape-tree",
-                        elements=initial_elements,
-                        layout={
-                            "name": "breadthfirst",
-                            "directed": True,
-                            "padding": 10,
-                            "animate": True,
-                            "animationDuration": 500
-                        },
-                        style={"width": "100%", "height": "568px"},
-                        stylesheet=[
-                            {
-                                "selector": "node",
-                                "style": {
-                                    "label": "data(label)",
-                                    "background-color": header_colour,
-                                    "width": 60,
-                                    "height": 60,
-                                    "font-size": "14px",
-                                    "text-valign": "center",
-                                    "text-halign": "center"
-                                }
+                        ),
+                        md=6
+                    )
+                ]
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        cyto.Cytoscape(
+                            id="cytoscape-tree",
+                            elements=[],
+                            layout={
+                                "name": "breadthfirst",
+                                "directed": True,
+                                "padding": 10,
+                                "animate": True,
+                                "animationDuration": 500
                             },
-                            {
-                                "selector": "edge",
-                                "style": {
-                                    "line-color": "#A3C4BC",
-                                    "width": 1
+                            style={"width": "100%", "height": "568px"},
+                            stylesheet=[]
+                        ),
+                        width=12
+                    ),
+                    dbc.Col(
+                        EventListener(
+                            id="cytoscape-listener",
+                            events=[
+                                {"event": "tap", "props": ["type", "target.id"]},
+                                {"event": "dblclick", "props": ["type", "target.id"]}
+                            ],
+                            logging=True
+                        ),
+                        width=0
+                    )
+                ],
+                className="mb-3"
+            ),
+            dbc.Row(
+                dbc.Col(
+                    html.Button(
+                        "Reset All",
+                        id="reset-all",
+                        n_clicks=0,
+                        style={
+                            "backgroundColor": "#F28265",
+                            "color": "white",
+                            "border": "none",
+                            "borderRadius": "8px",
+                            "padding": "8px 16px",
+                            "fontSize": "14px",
+                            "cursor": "pointer",
+                            "marginBottom": "10px"
+                        }
+                    ),
+                    width=12,
+                    style={"textAlign": "right"}
+                )
+            ),
+            dbc.Row(
+                dbc.Col(
+                    html.Div(
+                        [
+                            html.Div(
+                                id="node-info",
+                                style={
+                                    "fontWeight": "bold",
+                                    "marginBottom": "10px",
+                                    "textAlign": "left",
+                                    "color": "#333"
                                 }
-                            }
+                            ),
+                            html.Div(
+                                dash_table.DataTable(
+                                    id="tree-table",
+                                    columns=[
+                                        {"name": "Scientific name", "id": "Scientific name", "presentation": "markdown"},
+                                        {"name": "Common name", "id": "Common name"},
+                                        {"name": "Current Status", "id": "Current Status"},
+                                        {"name": "Symbionts Status", "id": "Symbionts Status"},
+                                        {"name": "Phylogeny", "id": "Phylogeny"},
+                                    ],
+                                    data=[],
+                                    page_action="native",
+                                    sort_action="none",
+                                    page_current=0,
+                                    page_size=10,
+                                    style_table={"overflowX": "auto"},
+                                    style_header={"textAlign": "center"},
+                                    style_cell={
+                                        "padding": "5px",
+                                        "textAlign": "center",
+                                        "verticalAlign": "middle",
+                                        "whiteSpace": "normal"
+                                    },
+                                    css=[{"selector": "a", "rule": "text-decoration: none !important;"}]
+                                ),
+                                style={
+                                    "background": "#fff",
+                                    "border": "1px solid #ddd",
+                                    "borderRadius": "6px",
+                                    "boxShadow": "0 2px 4px rgba(0,0,0,0.08)",
+                                    "padding": "16px",
+                                    "marginBottom": "20px",
+                                }
+                            )
                         ]
                     ),
                     width=12
-                ),
-                dbc.Col(
-                    EventListener(
-                        id="cytoscape-listener",
-                        events=[
-                            {"event": "tap", "props": ["type", "target.id"]},
-                            {"event": "dblclick", "props": ["type", "target.id"]}
-                        ],
-                        logging=True
-                    ),
-                    width=0
                 )
-            ],
-            className="mb-3"
-        ),
-
-        dbc.Row(
-            dbc.Col(
-                html.Div(id="node-info", style={"fontWeight": "bold", "marginBottom": "10px"}),
-                width=12
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(dcc.Store(id="full-tree-store", data={}), width=0),
+                    dbc.Col(dcc.Store(id="expanded-store", data=[]), width=0)
+                ]
             )
-        ),
+        ]
+    )
+])
 
-        dbc.Row(
-            dbc.Col(
-                html.Div(
-                    style={
-                        "background": "#fff",
-                        "border": "1px solid #ddd",
-                        "borderRadius": "6px",
-                        "boxShadow": "0 2px 4px rgba(0,0,0,0.08)",
-                        "padding": "16px",
-                        "marginBottom": "20px",
-                        "maxHeight": "400px",
-                        "overflow": "auto"
-                    },
-                    children=[
-                        dash_table.DataTable(
-                            id="tree-table",
-                            columns=[
-                                {"name": "Scientific name", "id": "Scientific name", "presentation": "markdown"},
-                                {"name": "Common name", "id": "Common name"},
-                                {"name": "Current Status", "id": "Current Status"},
-                                {"name": "Symbionts Status", "id": "Symbionts Status"},
-                                {"name": "Phylogeny", "id": "Phylogeny"},
-                            ],
-                            data=table_rows,
-                            page_action="native",
-                            sort_action="none",
-                            page_current=0,
-                            page_size=10,
-                            style_table={"overflowX": "auto"},
-                            style_header={"backgroundColor": header_colour, "color": "black"},
-                            style_cell={"textAlign": "left", "padding": "5px"}
-                        )
-                    ]
-                ),
-                width=12
-            )
-        ),
 
-        dbc.Row(
-            [
-                dbc.Col(dcc.Store(id="filtered-tree", data=tree), width=0),
-                dbc.Col(dcc.Store(id="expanded-store", data=initial_expanded), width=0)
-            ]
-        )
-    ]
+@dash.callback(
+    Output("project-store", "data"),
+    Input("url", "search")
 )
+def update_project_from_url(search_string):
+    if not search_string:
+        return "dtol"
+    parsed = parse_qs(search_string.lstrip("?"))
+    project_name = parsed.get("projectName", ["dtol"])[0]
+    if project_name not in PROJECT_PARQUET_MAP:
+        return "dtol"
+    return project_name
 
 
 @dash.callback(
     Output("node-info", "children"),
     Input("cytoscape-tree", "tapNodeData"),
-    State("filtered-tree", "data"),
+    State("full-tree-store", "data"),
     prevent_initial_call=True
 )
 def update_node_info(data, tree_data):
@@ -548,10 +579,15 @@ def update_node_info(data, tree_data):
     Output("chk-sci", "options"),
     Output("chk-common", "value"),
     Output("chk-sci", "value"),
-    Output("filtered-tree", "data"),
+    Output("full-tree-store", "data"),
     Output("tree-table", "data"),
     Output("expanded-store", "data"),
     Output("cytoscape-tree", "elements"),
+    Output("cytoscape-tree", "stylesheet"),
+    Output("tree-table", "style_header"),
+    Output("sci-filter-header", "style"),
+    Output("common-filter-header", "style"),
+    Input("project-store", "data"),
     Input("chk-sci", "value"),
     Input("chk-common", "value"),
     Input("search-sci", "value"),
@@ -564,17 +600,40 @@ def update_node_info(data, tree_data):
     Input("reset-all", "n_clicks"),
     Input("cytoscape-listener", "n_events"),
     State("expanded-store", "data"),
-    State("filtered-tree", "data"),
+    State("full-tree-store", "data"),
     State("cytoscape-listener", "event"),
     prevent_initial_call=True
 )
 def master(
+        project_name,
         sci_sel, common_sel, search_sci, search_common,
         sub_sci, sub_com, clr_sci, clr_com,
         tap_node, reset_all, dbl_count,
-        expanded, tree_data, listener_event
+        expanded_nodes, full_tree_data, listener_event
 ):
     triggered = {t["prop_id"] for t in callback_context.triggered}
+
+    if "project-store.data" in triggered or "reset-all.n_clicks" in triggered:
+        return init_project(project_name)
+
+    if "clear-sci.n_clicks" in triggered or "clear-common.n_clicks" in triggered:
+        if "clear-sci.n_clicks" in triggered:
+            sci_sel = []
+        if "clear-common.n_clicks" in triggered:
+            common_sel = []
+        if not sci_sel and not common_sel:
+            return init_project(project_name)
+
+    records_df = DATASETS.get(project_name)
+    if records_df is None:
+        records_df = load_data(project_name)
+    records = records_df.to_dict(orient="records")
+    tree_data = full_tree_data
+
+    sci_sel = [s for s in (sci_sel or []) if s != "Not Specified"]
+    common_sel = [c for c in (common_sel or []) if c != "Not Specified"]
+    search_sci = search_sci or ""
+    search_common = search_common or ""
 
     if "cytoscape-listener.n_events" in triggered and listener_event.get("type") == "dblclick":
         if not tap_node or "id" not in tap_node:
@@ -587,17 +646,15 @@ def master(
             data = el["data"]
             if "source" in data and "target" in data:
                 children_map.setdefault(data["source"], []).append(data["target"])
-        leaf_ids = [n for n in subs if not children_map.get(n)]
+        leaf_ids = [nid for nid in subs if not children_map.get(nid)]
         leaf_rows = [r for r in tree_to_table_rows(tree_data) if r["node_id"] in leaf_ids]
+
         visible = []
         for row in leaf_rows:
             sci_plain = row["Scientific name"]
             rec = next((x for x in records if x["scientific_name"] == sci_plain), {})
-            if PROJECT in ("erga", "gbdp"):
-                link_target = rec.get("tax_id", sci_plain)
-            else:
-                link_target = sci_plain
-            md_link = make_link(sci_plain, link_target)
+            link_target = rec.get("tax_id", sci_plain) if project_name in ("erga", "gbdp") else sci_plain
+            md_link = make_link(sci_plain, project_name, link_target)
             visible.append({
                 "Scientific name": md_link,
                 "Common name": rec.get("common_name", ""),
@@ -605,37 +662,72 @@ def master(
                 "Symbionts Status": rec.get("symbionts_status", ""),
                 "Phylogeny": row["Phylogeny"]
             })
+
         subtree_recs = [
             rec for rec in records
             if rec["scientific_name"] in {row["Scientific name"] for row in leaf_rows}
         ]
-        sci_vals = sorted(
-            {
-                sci_val
-                for record_data in subtree_recs
-                for sci_val in record_data["phylogenetic_tree_scientific_names"]
-                if sci_val.lower() != "not specified"
-            }
+        sci_vals = sorted({
+            sci_val
+            for record_data in subtree_recs
+            for sci_val in record_data["phylogenetic_tree_scientific_names"]
+            if sci_val.lower() != "not specified"
+        })
+        com_vals = sorted({
+            common_val
+            for record_data in subtree_recs
+            for common_val in record_data["phylogenetic_tree_common_names"]
+            if common_val.lower() != "not specified"
+        })
+        sci_opts = [{"label": s, "value": s} for s in sci_vals]
+        com_opts = [{"label": c, "value": c} for c in com_vals]
+
+        return (
+            com_opts,
+            sci_opts,
+            com_vals,
+            sci_vals,
+            no_update,
+            visible,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update
         )
-        com_vals = sorted(
-            {
-                common_val
-                for record_data in subtree_recs
-                for common_val in record_data["phylogenetic_tree_common_names"]
-                if common_val.lower() != "not specified"
-            }
+
+    if "cytoscape-tree.tapNodeData" in triggered and tap_node:
+        nd = build_node_dict(tree_data, {})
+        nid = tap_node["id"]
+        if nid in expanded_nodes:
+            to_remove = set()
+            def collect(x):
+                for c in nd[x]["children"]:
+                    to_remove.add(c["id"])
+                    collect(c["id"])
+            collect(nid)
+            new_expanded = [e for e in expanded_nodes if e not in to_remove and e != nid]
+        else:
+            new_expanded = expanded_nodes + [nid]
+        new_elems = tree_to_elements(tree_data, new_expanded)
+        return (
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            new_expanded,
+            new_elems,
+            no_update,
+            no_update,
+            no_update,
+            no_update
         )
-        sci_opts = [{"label": sci_val, "value": sci_val} for sci_val in sci_vals]
-        com_opts = [{"label": common_val, "value": common_val} for common_val in com_vals]
-        return com_opts, sci_opts, com_vals, sci_vals, no_update, visible, no_update, no_update
 
     ctx = callback_context.triggered[0]
     comp, prop = ctx["prop_id"].split(".")
-    sci_sel = [s for s in (sci_sel or []) if s != "Not Specified"]
-    common_sel = [c for c in (common_sel or []) if c != "Not Specified"]
-    search_sci = search_sci or ""
-    search_common = search_common or ""
-
     if comp == "search-sci" and prop in ("value", "n_submit"):
         allowed = {
             sci
@@ -652,6 +744,10 @@ def master(
         return (
             no_update,
             [{"label": s, "value": s} for s in sorted(allowed)],
+            no_update,
+            no_update,
+            no_update,
+            no_update,
             no_update,
             no_update,
             no_update,
@@ -681,83 +777,33 @@ def master(
             no_update,
             no_update,
             no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
             no_update
         )
 
-    if comp == "clear-sci" and prop == "n_clicks":
-        sci_sel = []
-
-    if comp == "clear-common" and prop == "n_clicks":
-        common_sel = []
-
-    if comp == "cytoscape-tree" and prop == "tapNodeData" and tap_node:
-        nd = build_node_dict(tree_data, {})
-        nid = tap_node["id"]
-        if nid in expanded:
-            to_remove = set()
-
-            def collect(x):
-                for c in nd[x]["children"]:
-                    to_remove.add(c["id"])
-                    collect(c["id"])
-
-            collect(nid)
-            new_expanded = [e for e in expanded if e not in to_remove and e != nid]
-        else:
-            new_expanded = expanded + [nid]
-        new_elems = tree_to_elements(tree_data, new_expanded)
-        return (
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-            no_update,
-            new_expanded,
-            new_elems
-        )
-
     if not sci_sel and not common_sel:
-        return (
-            common_options,
-            checklist_options,
-            [],
-            [],
-            tree,
-            table_rows,
-            initial_expanded,
-            initial_elements
-        )
+        return init_project(project_name)
 
-    if comp == "reset-all" and prop == "n_clicks":
-        return (
-            common_options,
-            checklist_options,
-            [],
-            [],
-            tree,
-            table_rows,
-            initial_expanded,
-            initial_elements
-        )
-
-    filtered = [
+    filtered_records = [
         rec for rec in records
         if (not sci_sel or any(s in rec["phylogenetic_tree_scientific_names"] for s in sci_sel))
            and (not common_sel or any(c in rec["phylogenetic_tree_common_names"] for c in common_sel))
     ]
 
-    new_tree = build_taxonomy_tree(filtered, RANKS)
+    new_tree = build_taxonomy_tree(filtered_records, RANKS)
     new_rows = tree_to_table_rows(new_tree)
     nd_new = build_node_dict(new_tree, {})
-    exp_ids = {new_tree["id"]}
-    for rec in filtered:
-        leaf = rec["scientific_name"]
+    exp_ids = [new_tree["id"]]
+    for rec in filtered_records:
+        leaf_name = rec["scientific_name"]
         for row in new_rows:
-            if row["Scientific name"] == leaf:
+            if row["Scientific name"] == leaf_name:
                 cur = row["node_id"]
                 while cur:
-                    exp_ids.add(cur)
+                    exp_ids.append(cur)
                     cur = nd_new[cur].get("parent")
                 break
     new_elems = tree_to_elements(new_tree, exp_ids)
@@ -766,12 +812,9 @@ def master(
     for row in new_rows:
         if row["node_id"] in exp_ids and not nd_new[row["node_id"]]["children"]:
             sci_plain = row["Scientific name"]
-            rec = next((x for x in filtered if x["scientific_name"] == sci_plain), {})
-            if PROJECT in ("erga", "gbdp"):
-                link_target = rec.get("tax_id", sci_plain)
-            else:
-                link_target = sci_plain
-            md_link = make_link(sci_plain, link_target)
+            rec = next((x for x in filtered_records if x["scientific_name"] == sci_plain), {})
+            link_target = rec.get("tax_id", sci_plain) if project_name in ("erga", "gbdp") else sci_plain
+            md_link = make_link(sci_plain, project_name, link_target)
             visible.append({
                 "Scientific name": md_link,
                 "Common name": rec.get("common_name", ""),
@@ -793,13 +836,20 @@ def master(
         ) if (not sci_sel or sci in sci_sel) and cm and cm.lower() != "not specified"
     }
 
+    sci_options = [{"label": s_val, "value": s_val} for s_val in sorted(allowed_sci)]
+    com_options = [{"label": c_val, "value": c_val} for c_val in sorted(allowed_com)]
+
     return (
-        [{"label": c_val, "value": c_val} for c_val in sorted(allowed_com)],
-        [{"label": s_val, "value": s_val} for s_val in sorted(allowed_sci)],
+        com_options,
+        sci_options,
         common_sel,
         sci_sel,
         new_tree,
         visible,
-        list(exp_ids),
-        new_elems
+        exp_ids,
+        new_elems,
+        no_update,
+        no_update,
+        no_update,
+        no_update
     )
