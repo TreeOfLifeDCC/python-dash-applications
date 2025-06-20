@@ -975,103 +975,108 @@ def build_map(
     project_name,
     selected_geotags
 ):
-    df_lazy = DATASETS[project_name]["grouped_data"].lazy()
+    try:
+        df_lazy = DATASETS[project_name]["grouped_data"].lazy()
 
-    if selected_geotags:
-        df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
+        if selected_geotags:
+            df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
 
-    filter_configs = [
-        ("organisms.organism", selected_organisms),
-        ("common_name", selected_common_names),
-        ("current_status", selected_current_status),
-        ("experiment_type", selected_experiment_types),
-    ]
+        filter_configs = [
+            ("organisms.organism", selected_organisms),
+            ("common_name", selected_common_names),
+            ("current_status", selected_current_status),
+            ("experiment_type", selected_experiment_types),
+        ]
 
-    for field, values in filter_configs:
-        if values:
-            df_lazy = df_lazy.filter(
-                pl.col(field)
-                .str.split(", ")
-                .list.eval(pl.element().is_in(values))
-                .list.any()
+        for field, values in filter_configs:
+            if values:
+                df_lazy = df_lazy.filter(
+                    pl.col(field)
+                    .str.split(", ")
+                    .list.eval(pl.element().is_in(values))
+                    .list.any()
+                )
+
+        # get min/max counts for scaling (minimal collection - just aggregates)
+        count_stats = df_lazy.select([
+            pl.col("Record Count").min().alias("min_count"),
+            pl.col("Record Count").max().alias("max_count"),
+            pl.len().alias("total_rows")
+        ]).collect()
+
+        if count_stats.height > 0:
+            min_count = count_stats["min_count"][0] or 1
+            max_count = count_stats["max_count"][0] or 1
+            total_rows = count_stats["total_rows"][0]
+        else:
+            min_count, max_count, total_rows = 1, 1, 0
+
+        min_size, max_size = 3, 50
+
+        if total_rows > 0:
+            if max_count > min_count:
+                processed_df = df_lazy.with_columns([
+                    (((pl.col("Record Count") - min_count) / (max_count - min_count))
+                     * (max_size - min_size)
+                     + min_size
+                     ).alias("scaled_size")
+                ])
+            else:
+                # use minimum size
+                processed_df = df_lazy.with_columns([
+                    pl.lit(min_size).alias("scaled_size")
+                ])
+
+            # collect final data needed for visualization
+            df_final = processed_df.collect()
+
+            # convert to pandas
+            pdf = df_final.to_pandas()
+
+            # build map figure
+            fig = px.scatter_map(
+                pdf,
+                lat="lat",
+                lon="lon",
+                color="Kingdom",
+                size="scaled_size",
+                zoom=3,
+                hover_name="geotag",
+                hover_data={
+                    "lat": False,
+                    "lon": False,
+                    "scaled_size": False,
+                    "Kingdom": True,
+                    "Record Count": True
+                },
+                height=800
+            )
+        else:
+            fig = px.scatter_map(
+                lat=[],
+                lon=[],
+                zoom=3,
+                height=800
             )
 
-    # get min/max counts for scaling (minimal collection - just aggregates)
-    count_stats = df_lazy.select([
-        pl.col("Record Count").min().alias("min_count"),
-        pl.col("Record Count").max().alias("max_count"),
-        pl.len().alias("total_rows")
-    ]).collect()
-
-    if count_stats.height > 0:
-        min_count = count_stats["min_count"][0] or 1
-        max_count = count_stats["max_count"][0] or 1
-        total_rows = count_stats["total_rows"][0]
-    else:
-        min_count, max_count, total_rows = 1, 1, 0
-
-    min_size, max_size = 3, 50
-
-    if total_rows > 0:
-        if max_count > min_count:
-            processed_df = df_lazy.with_columns([
-                (((pl.col("Record Count") - min_count) / (max_count - min_count))
-                 * (max_size - min_size)
-                 + min_size
-                 ).alias("scaled_size")
-            ])
-        else:
-            # use minimum size
-            processed_df = df_lazy.with_columns([
-                pl.lit(min_size).alias("scaled_size")
-            ])
-
-        # collect final data needed for visualization
-        df_final = processed_df.collect()
-
-        # convert to pandas
-        pdf = df_final.to_pandas()
-
-        # build map figure
-        fig = px.scatter_map(
-            pdf,
-            lat="lat",
-            lon="lon",
-            color="Kingdom",
-            size="scaled_size",
-            zoom=3,
-            hover_name="geotag",
-            hover_data={
-                "lat": False,
-                "lon": False,
-                "scaled_size": False,
-                "Kingdom": True,
-                "Record Count": True
-            },
-            height=800
-        )
-    else:
-        fig = px.scatter_map(
-            lat=[],
-            lon=[],
-            zoom=3,
-            height=800
+        fig.update_layout(
+            mapbox_style="open-street-map",
+            margin={"r": 0, "t": 0, "l": 0, "b": 0},
+            legend=dict(
+                title="Kingdom",
+                orientation="h",
+                x=0.5,
+                xanchor="center",
+                y=-0.07,
+                yanchor="bottom"
+            )
         )
 
-    fig.update_layout(
-        mapbox_style="open-street-map",
-        margin={"r": 0, "t": 0, "l": 0, "b": 0},
-        legend=dict(
-            title="Kingdom",
-            orientation="h",
-            x=0.5,
-            xanchor="center",
-            y=-0.07,
-            yanchor="bottom"
-        )
-    )
-
-    return fig
+        return fig
+    except Exception as e:
+        import traceback
+        logger.error("Error in .collect():\n" + traceback.format_exc())
+        raise
 
 
 @callback(
