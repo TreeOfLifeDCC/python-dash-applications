@@ -1001,7 +1001,8 @@ def build_map(
         count_stats = df_lazy.select([
             pl.col("Record Count").min().alias("min_count"),
             pl.col("Record Count").max().alias("max_count"),
-            pl.count().alias("total_rows")
+            # pl.count().alias("total_rows")
+            pl.col("Record Count").count().alias("total_rows")
         ]).collect()
 
         if count_stats.height > 0:
