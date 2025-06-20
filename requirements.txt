@@ -3,3 +3,4 @@ dash_bootstrap_components[pandas]>=1.7.1
 gunicorn>=23.0.0
 pyarrow>=19.0.1
 gcsfs>=2025.3.2
+polars>=1.30.0
