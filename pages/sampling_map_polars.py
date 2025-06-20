@@ -977,108 +977,189 @@ def build_map(
     selected_geotags
 ):
     try:
-        df_lazy = DATASETS[project_name]["grouped_data"].lazy()
+        # Add input validation
+        if not project_name or project_name not in DATASETS:
+            logger.warning(f"Invalid project_name: {project_name}")
+            return create_empty_map()
 
-        if selected_geotags:
-            df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
+        # Add timeout protection for lazy operations
+        import signal
 
-        filter_configs = [
-            ("organisms.organism", selected_organisms),
-            ("common_name", selected_common_names),
-            ("current_status", selected_current_status),
-            ("experiment_type", selected_experiment_types),
-        ]
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Operation timed out")
 
-        for field, values in filter_configs:
-            if values:
-                df_lazy = df_lazy.filter(
-                    pl.col(field)
-                    .str.split(", ")
-                    .list.eval(pl.element().is_in(values))
-                    .list.any()
-                )
+        # Set timeout for cloud environments (30 seconds)
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(30)
 
-        # get min/max counts for scaling (minimal collection - just aggregates)
-        count_stats = df_lazy.select([
-            pl.col("Record Count").min().alias("min_count"),
-            pl.col("Record Count").max().alias("max_count"),
-            # pl.count().alias("total_rows")
-            pl.col("Record Count").count().alias("total_rows")
-        ]).collect()
+        try:
+            df_lazy = DATASETS[project_name]["grouped_data"].lazy()
 
-        if count_stats.height > 0:
-            min_count = count_stats["min_count"][0] or 1
-            max_count = count_stats["max_count"][0] or 1
-            total_rows = count_stats["total_rows"][0]
-        else:
-            min_count, max_count, total_rows = 1, 1, 0
+            # Validate data exists
+            if df_lazy is None:
+                logger.warning(f"No data found for project: {project_name}")
+                return create_empty_map()
 
-        min_size, max_size = 3, 50
+            # Apply filters with better error handling
+            if selected_geotags:
+                df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
 
-        if total_rows > 0:
-            if max_count > min_count:
-                processed_df = df_lazy.with_columns([
-                    (((pl.col("Record Count") - min_count) / (max_count - min_count))
-                     * (max_size - min_size)
-                     + min_size
-                     ).alias("scaled_size")
-                ])
+            filter_configs = [
+                ("organisms.organism", selected_organisms),
+                ("common_name", selected_common_names),
+                ("current_status", selected_current_status),
+                ("experiment_type", selected_experiment_types),
+            ]
+
+            for field, values in filter_configs:
+                if values and len(values) > 0:
+                    try:
+                        df_lazy = df_lazy.filter(
+                            pl.col(field)
+                            .str.split(", ")
+                            .list.eval(pl.element().is_in(values))
+                            .list.any()
+                        )
+                    except Exception as filter_error:
+                        logger.error(f"Filter error on field {field}: {str(filter_error)}")
+                        # Continue with other filters rather than failing completely
+                        pass
+
+            # Memory-efficient count calculation with error handling
+            try:
+                count_stats = df_lazy.select([
+                    pl.col("Record Count").min().alias("min_count"),
+                    pl.col("Record Count").max().alias("max_count"),
+                    pl.col("Record Count").count().alias("total_rows")
+                ]).collect()
+            except Exception as stats_error:
+                logger.error(f"Error calculating stats: {str(stats_error)}")
+                return create_empty_map()
+
+            if count_stats.height > 0:
+                min_count = count_stats["min_count"][0] or 1
+                max_count = count_stats["max_count"][0] or 1
+                total_rows = count_stats["total_rows"][0]
             else:
-                # use minimum size
-                processed_df = df_lazy.with_columns([
-                    pl.lit(min_size).alias("scaled_size")
-                ])
+                min_count, max_count, total_rows = 1, 1, 0
 
-            # collect final data needed for visualization
-            df_final = processed_df.collect()
+            min_size, max_size = 3, 50
 
-            # convert to pandas
-            pdf = df_final.to_pandas()
+            if total_rows > 0:
+                # Limit data size for cloud environments
+                if total_rows > 10000:  # Adjust this limit based on your needs
+                    logger.warning(f"Large dataset ({total_rows} rows), sampling for performance")
+                    df_lazy = df_lazy.sample(n=10000, seed=42)
 
-            # build map figure
-            fig = px.scatter_map(
-                pdf,
-                lat="lat",
-                lon="lon",
-                color="Kingdom",
-                size="scaled_size",
-                zoom=3,
-                hover_name="geotag",
-                hover_data={
-                    "lat": False,
-                    "lon": False,
-                    "scaled_size": False,
-                    "Kingdom": True,
-                    "Record Count": True
-                },
-                height=800
+                if max_count > min_count:
+                    processed_df = df_lazy.with_columns([
+                        (((pl.col("Record Count") - min_count) / (max_count - min_count))
+                         * (max_size - min_size)
+                         + min_size
+                         ).alias("scaled_size")
+                    ])
+                else:
+                    processed_df = df_lazy.with_columns([
+                        pl.lit(min_size).alias("scaled_size")
+                    ])
+
+                # Collect with memory management
+                try:
+                    df_final = processed_df.collect()
+                except Exception as collect_error:
+                    logger.error(f"Error during collect(): {str(collect_error)}")
+                    return create_empty_map()
+
+                # Convert to pandas with error handling
+                try:
+                    pdf = df_final.to_pandas()
+                except Exception as pandas_error:
+                    logger.error(f"Error converting to pandas: {str(pandas_error)}")
+                    return create_empty_map()
+
+                # Validate required columns exist
+                required_cols = ["lat", "lon", "Kingdom", "scaled_size", "geotag", "Record Count"]
+                missing_cols = [col for col in required_cols if col not in pdf.columns]
+                if missing_cols:
+                    logger.error(f"Missing required columns: {missing_cols}")
+                    return create_empty_map()
+
+                # Remove any invalid coordinates
+                pdf = pdf.dropna(subset=["lat", "lon"])
+                pdf = pdf[(pdf["lat"].between(-90, 90)) & (pdf["lon"].between(-180, 180))]
+
+                if len(pdf) == 0:
+                    logger.warning("No valid coordinates after filtering")
+                    return create_empty_map()
+
+                # Build map figure with error handling
+                try:
+                    fig = px.scatter_map(
+                        pdf,
+                        lat="lat",
+                        lon="lon",
+                        color="Kingdom",
+                        size="scaled_size",
+                        zoom=3,
+                        hover_name="geotag",
+                        hover_data={
+                            "lat": False,
+                            "lon": False,
+                            "scaled_size": False,
+                            "Kingdom": True,
+                            "Record Count": True
+                        },
+                        height=800
+                    )
+                except Exception as plot_error:
+                    logger.error(f"Error creating plot: {str(plot_error)}")
+                    return create_empty_map()
+            else:
+                fig = create_empty_map()
+
+            # Configure map layout
+            fig.update_layout(
+                mapbox_style="open-street-map",
+                margin={"r": 0, "t": 0, "l": 0, "b": 0},
+                legend=dict(
+                    title="Kingdom",
+                    orientation="h",
+                    x=0.5,
+                    xanchor="center",
+                    y=-0.07,
+                    yanchor="bottom"
+                )
             )
-        else:
-            fig = px.scatter_map(
-                lat=[],
-                lon=[],
-                zoom=3,
-                height=800
-            )
 
-        fig.update_layout(
-            mapbox_style="open-street-map",
-            margin={"r": 0, "t": 0, "l": 0, "b": 0},
-            legend=dict(
-                title="Kingdom",
-                orientation="h",
-                x=0.5,
-                xanchor="center",
-                y=-0.07,
-                yanchor="bottom"
-            )
-        )
+            return fig
 
-        return fig
+        finally:
+            # Clear the timeout
+            signal.alarm(0)
+
+    except TimeoutError:
+        logger.error("Operation timed out in cloud environment")
+        return create_empty_map()
     except Exception as e:
         import traceback
-        logger.error("Error in .collect():\n" + traceback.format_exc())
-        raise
+        logger.error("Error in build_map callback:\n" + traceback.format_exc())
+        return create_empty_map()
+
+
+def create_empty_map():
+    """Helper function to create an empty map when errors occur"""
+    fig = px.scatter_map(
+        lat=[],
+        lon=[],
+        zoom=3,
+        height=800
+    )
+    fig.update_layout(
+        mapbox_style="open-street-map",
+        margin={"r": 0, "t": 0, "l": 0, "b": 0},
+        title="No data available or error occurred"
+    )
+    return fig
 
 
 @callback(
