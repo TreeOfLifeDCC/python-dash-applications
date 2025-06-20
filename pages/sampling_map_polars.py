@@ -54,6 +54,7 @@ def extract_unique_protocols(raw_data_entry):
 
 def load_data(project_name):
     if project_name not in DATASETS:
+        print("koosum")
         gcs_pattern = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
 
         fs = fsspec.filesystem("gcs")
