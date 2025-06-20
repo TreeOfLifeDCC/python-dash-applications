@@ -8,7 +8,8 @@ import dash
 import fsspec
 from dash import dcc, callback, Output, Input, dash_table, State, no_update, html, ctx, callback_context
 import dash_bootstrap_components as dbc
-import polars as pl # Add this import
+import polars as pl
+import logging
 
 
 dash.register_page(
@@ -16,6 +17,8 @@ dash.register_page(
     path_template="/sampling-map",
     title="Sampling Map",
 )
+
+logger = logging.getLogger(__name__)
 
 credentials, project = google.auth.default()
 fs = GCSFileSystem(token=credentials)
@@ -648,307 +651,311 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                       search_organism, search_common_name, search_current_status, search_experiment_type,
                       checklist_selection_order, project_name,
                       click_flag_value, selection_flag_value, selected_data, click_data, selected_geotags):
+    try:
+        df_lazy = DATASETS[project_name]["df_data"].lazy()
 
-    df_lazy = DATASETS[project_name]["df_data"].lazy()
+        if selected_geotags:
+            df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
 
-    if selected_geotags:
-        df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
+        df_processed = df_lazy.with_columns([
+            # split and prepare organism column
+            pl.when(pl.col("organisms.organism").is_not_null())
+            .then(pl.concat_list([pl.col("organisms.organism").cast(pl.Utf8)]))
+            .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
+            .alias("organisms_split"),
 
-    df_processed = df_lazy.with_columns([
-        # split and prepare organism column
-        pl.when(pl.col("organisms.organism").is_not_null())
-        .then(pl.concat_list([pl.col("organisms.organism").cast(pl.Utf8)]))
-        .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
-        .alias("organisms_split"),
+            # split and prepare experiment_type column
+            pl.when(pl.col("experiment_type").is_not_null())
+            .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
+            .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
+            .alias("experiment_type_split"),
 
-        # split and prepare experiment_type column
-        pl.when(pl.col("experiment_type").is_not_null())
-        .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
-        .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
-        .alias("experiment_type_split"),
+            pl.col("common_name").cast(pl.Utf8),
+            pl.col("current_status").cast(pl.Utf8)
+        ])
 
-        pl.col("common_name").cast(pl.Utf8),
-        pl.col("current_status").cast(pl.Utf8)
-    ])
+        df_org_exploded = df_processed.explode("organisms_split").filter(pl.col("organisms_split").is_not_null())
+        df_exp_exploded = df_processed.explode("experiment_type_split").filter(
+            pl.col("experiment_type_split").is_not_null())
 
-    df_org_exploded = df_processed.explode("organisms_split").filter(pl.col("organisms_split").is_not_null())
-    df_exp_exploded = df_processed.explode("experiment_type_split").filter(
-        pl.col("experiment_type_split").is_not_null())
+        all_organisms = sorted(
+            df_processed.select(pl.col("organisms_split").flatten().drop_nulls().unique())
+            .collect()
+            .to_series()
+            .to_list()
+        )
 
-    all_organisms = sorted(
-        df_processed.select(pl.col("organisms_split").flatten().drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+        all_common_names = sorted(
+            df_processed.select(pl.col("common_name").drop_nulls().unique())
+            .collect()
+            .to_series()
+            .to_list()
+        )
 
-    all_common_names = sorted(
-        df_processed.select(pl.col("common_name").drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+        all_current_status = sorted(
+            df_processed.select(pl.col("current_status").drop_nulls().unique())
+            .collect()
+            .to_series()
+            .to_list()
+        )
 
-    all_current_status = sorted(
-        df_processed.select(pl.col("current_status").drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+        all_experiment_type = sorted(
+            df_processed.select(pl.col("experiment_type_split").flatten().drop_nulls().unique())
+            .collect()
+            .to_series()
+            .to_list()
+        )
 
-    all_experiment_type = sorted(
-        df_processed.select(pl.col("experiment_type_split").flatten().drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+        all_values = {
+            "all_organisms": all_organisms,
+            "all_common_names": all_common_names,
+            "all_current_status": all_current_status,
+            "all_experiment_type": all_experiment_type,
+        }
 
-    all_values = {
-        "all_organisms": all_organisms,
-        "all_common_names": all_common_names,
-        "all_current_status": all_current_status,
-        "all_experiment_type": all_experiment_type,
-    }
+        # Apply search filters
+        search_map = {
+            "all_organisms": search_organism,
+            "all_common_names": search_common_name,
+            "all_current_status": search_current_status,
+            "all_experiment_type": search_experiment_type,
+        }
 
-    # Apply search filters
-    search_map = {
-        "all_organisms": search_organism,
-        "all_common_names": search_common_name,
-        "all_current_status": search_current_status,
-        "all_experiment_type": search_experiment_type,
-    }
-
-    for key, search in search_map.items():
-        if search:
-            all_values[key] = [v for v in all_values[key] if search.lower() in v.lower()]
+        for key, search in search_map.items():
+            if search:
+                all_values[key] = [v for v in all_values[key] if search.lower() in v.lower()]
 
 
-    lookup_tables = {}
+        lookup_tables = {}
 
-    #only build lookup tables if we have user selections
-    user_selection = False
-    checklist_mappings = {
-        "organism-checklist": "selected_organisms",
-        "common-name-checklist": "selected_common_names",
-        "current-status-checklist": "selected_current_status",
-        "experiment-type-checklist": "selected_experiment_type"
-    }
+        #only build lookup tables if we have user selections
+        user_selection = False
+        checklist_mappings = {
+            "organism-checklist": "selected_organisms",
+            "common-name-checklist": "selected_common_names",
+            "current-status-checklist": "selected_current_status",
+            "experiment-type-checklist": "selected_experiment_type"
+        }
 
-    selections_list = [checklist_mappings[chk_id] for chk_id in checklist_selection_order if
-                       chk_id in checklist_mappings]
+        selections_list = [checklist_mappings[chk_id] for chk_id in checklist_selection_order if
+                           chk_id in checklist_mappings]
 
-    if selections_list and len(selections_list) > 0:
-        user_selection = True
+        if selections_list and len(selections_list) > 0:
+            user_selection = True
 
-        lookup_queries = []
+            lookup_queries = []
 
-        # Organism to other fields
-        if any("organisms" in sel for sel in selections_list):
-            lookup_queries.extend([
-                df_org_exploded.group_by("organisms_split").agg([
-                    pl.col("common_name").drop_nulls().unique().alias("common_names")
-                ]).select([
-                    pl.col("organisms_split").alias("source"),
-                    pl.lit("organism_to_common").alias("lookup_type"),
-                    pl.col("common_names").alias("targets")
-                ]),
-                df_org_exploded.group_by("organisms_split").agg([
-                    pl.col("current_status").drop_nulls().unique().alias("statuses")
-                ]).select([
-                    pl.col("organisms_split").alias("source"),
-                    pl.lit("organism_to_status").alias("lookup_type"),
-                    pl.col("statuses").alias("targets")
-                ]),
-                df_org_exploded.explode("experiment_type_split").filter(
-                    pl.col("experiment_type_split").is_not_null()
-                ).group_by("organisms_split").agg([
-                    pl.col("experiment_type_split").unique().alias("exp_types")
-                ]).select([
-                    pl.col("organisms_split").alias("source"),
-                    pl.lit("organism_to_experiment").alias("lookup_type"),
-                    pl.col("exp_types").alias("targets")
+            # Organism to other fields
+            if any("organisms" in sel for sel in selections_list):
+                lookup_queries.extend([
+                    df_org_exploded.group_by("organisms_split").agg([
+                        pl.col("common_name").drop_nulls().unique().alias("common_names")
+                    ]).select([
+                        pl.col("organisms_split").alias("source"),
+                        pl.lit("organism_to_common").alias("lookup_type"),
+                        pl.col("common_names").alias("targets")
+                    ]),
+                    df_org_exploded.group_by("organisms_split").agg([
+                        pl.col("current_status").drop_nulls().unique().alias("statuses")
+                    ]).select([
+                        pl.col("organisms_split").alias("source"),
+                        pl.lit("organism_to_status").alias("lookup_type"),
+                        pl.col("statuses").alias("targets")
+                    ]),
+                    df_org_exploded.explode("experiment_type_split").filter(
+                        pl.col("experiment_type_split").is_not_null()
+                    ).group_by("organisms_split").agg([
+                        pl.col("experiment_type_split").unique().alias("exp_types")
+                    ]).select([
+                        pl.col("organisms_split").alias("source"),
+                        pl.lit("organism_to_experiment").alias("lookup_type"),
+                        pl.col("exp_types").alias("targets")
+                    ])
                 ])
-            ])
 
-        # Common Name to other fields
-        if any("common" in sel for sel in selections_list):
-            lookup_queries.extend([
-                df_processed.explode("organisms_split").filter(
-                    pl.col("organisms_split").is_not_null()
-                ).group_by("common_name").agg([
-                    pl.col("organisms_split").unique().alias("organisms")
-                ]).select([
-                    pl.col("common_name").alias("source"),
-                    pl.lit("common_to_organism").alias("lookup_type"),
-                    pl.col("organisms").alias("targets")
-                ]),
-                df_processed.group_by("common_name").agg([
-                    pl.col("current_status").drop_nulls().unique().alias("statuses")
-                ]).select([
-                    pl.col("common_name").alias("source"),
-                    pl.lit("common_to_status").alias("lookup_type"),
-                    pl.col("statuses").alias("targets")
-                ]),
-                df_processed.explode("experiment_type_split").filter(
-                    pl.col("experiment_type_split").is_not_null()
-                ).group_by("common_name").agg([
-                    pl.col("experiment_type_split").unique().alias("exp_types")
-                ]).select([
-                    pl.col("common_name").alias("source"),
-                    pl.lit("common_to_experiment").alias("lookup_type"),
-                    pl.col("exp_types").alias("targets")
+            # Common Name to other fields
+            if any("common" in sel for sel in selections_list):
+                lookup_queries.extend([
+                    df_processed.explode("organisms_split").filter(
+                        pl.col("organisms_split").is_not_null()
+                    ).group_by("common_name").agg([
+                        pl.col("organisms_split").unique().alias("organisms")
+                    ]).select([
+                        pl.col("common_name").alias("source"),
+                        pl.lit("common_to_organism").alias("lookup_type"),
+                        pl.col("organisms").alias("targets")
+                    ]),
+                    df_processed.group_by("common_name").agg([
+                        pl.col("current_status").drop_nulls().unique().alias("statuses")
+                    ]).select([
+                        pl.col("common_name").alias("source"),
+                        pl.lit("common_to_status").alias("lookup_type"),
+                        pl.col("statuses").alias("targets")
+                    ]),
+                    df_processed.explode("experiment_type_split").filter(
+                        pl.col("experiment_type_split").is_not_null()
+                    ).group_by("common_name").agg([
+                        pl.col("experiment_type_split").unique().alias("exp_types")
+                    ]).select([
+                        pl.col("common_name").alias("source"),
+                        pl.lit("common_to_experiment").alias("lookup_type"),
+                        pl.col("exp_types").alias("targets")
+                    ])
                 ])
-            ])
 
-        # Current Status to other fields
-        if any("status" in sel for sel in selections_list):
-            lookup_queries.extend([
-                df_processed.explode("organisms_split").filter(
-                    pl.col("organisms_split").is_not_null()
-                ).group_by("current_status").agg([
-                    pl.col("organisms_split").unique().alias("organisms")
-                ]).select([
-                    pl.col("current_status").alias("source"),
-                    pl.lit("status_to_organism").alias("lookup_type"),
-                    pl.col("organisms").alias("targets")
-                ]),
-                df_processed.group_by("current_status").agg([
-                    pl.col("common_name").drop_nulls().unique().alias("common_names")
-                ]).select([
-                    pl.col("current_status").alias("source"),
-                    pl.lit("status_to_common").alias("lookup_type"),
-                    pl.col("common_names").alias("targets")
-                ]),
-                df_processed.explode("experiment_type_split").filter(
-                    pl.col("experiment_type_split").is_not_null()
-                ).group_by("current_status").agg([
-                    pl.col("experiment_type_split").unique().alias("exp_types")
-                ]).select([
-                    pl.col("current_status").alias("source"),
-                    pl.lit("status_to_experiment").alias("lookup_type"),
-                    pl.col("exp_types").alias("targets")
+            # Current Status to other fields
+            if any("status" in sel for sel in selections_list):
+                lookup_queries.extend([
+                    df_processed.explode("organisms_split").filter(
+                        pl.col("organisms_split").is_not_null()
+                    ).group_by("current_status").agg([
+                        pl.col("organisms_split").unique().alias("organisms")
+                    ]).select([
+                        pl.col("current_status").alias("source"),
+                        pl.lit("status_to_organism").alias("lookup_type"),
+                        pl.col("organisms").alias("targets")
+                    ]),
+                    df_processed.group_by("current_status").agg([
+                        pl.col("common_name").drop_nulls().unique().alias("common_names")
+                    ]).select([
+                        pl.col("current_status").alias("source"),
+                        pl.lit("status_to_common").alias("lookup_type"),
+                        pl.col("common_names").alias("targets")
+                    ]),
+                    df_processed.explode("experiment_type_split").filter(
+                        pl.col("experiment_type_split").is_not_null()
+                    ).group_by("current_status").agg([
+                        pl.col("experiment_type_split").unique().alias("exp_types")
+                    ]).select([
+                        pl.col("current_status").alias("source"),
+                        pl.lit("status_to_experiment").alias("lookup_type"),
+                        pl.col("exp_types").alias("targets")
+                    ])
                 ])
-            ])
 
-        # Experiment Type to other fields
-        if any("experiment" in sel for sel in selections_list):
-            lookup_queries.extend([
-                df_exp_exploded.explode("organisms_split").filter(
-                    pl.col("organisms_split").is_not_null()
-                ).group_by("experiment_type_split").agg([
-                    pl.col("organisms_split").unique().alias("organisms")
-                ]).select([
-                    pl.col("experiment_type_split").alias("source"),
-                    pl.lit("experiment_to_organism").alias("lookup_type"),
-                    pl.col("organisms").alias("targets")
-                ]),
-                df_exp_exploded.group_by("experiment_type_split").agg([
-                    pl.col("common_name").drop_nulls().unique().alias("common_names")
-                ]).select([
-                    pl.col("experiment_type_split").alias("source"),
-                    pl.lit("experiment_to_common").alias("lookup_type"),
-                    pl.col("common_names").alias("targets")
-                ]),
-                df_exp_exploded.group_by("experiment_type_split").agg([
-                    pl.col("current_status").drop_nulls().unique().alias("statuses")
-                ]).select([
-                    pl.col("experiment_type_split").alias("source"),
-                    pl.lit("experiment_to_status").alias("lookup_type"),
-                    pl.col("statuses").alias("targets")
+            # Experiment Type to other fields
+            if any("experiment" in sel for sel in selections_list):
+                lookup_queries.extend([
+                    df_exp_exploded.explode("organisms_split").filter(
+                        pl.col("organisms_split").is_not_null()
+                    ).group_by("experiment_type_split").agg([
+                        pl.col("organisms_split").unique().alias("organisms")
+                    ]).select([
+                        pl.col("experiment_type_split").alias("source"),
+                        pl.lit("experiment_to_organism").alias("lookup_type"),
+                        pl.col("organisms").alias("targets")
+                    ]),
+                    df_exp_exploded.group_by("experiment_type_split").agg([
+                        pl.col("common_name").drop_nulls().unique().alias("common_names")
+                    ]).select([
+                        pl.col("experiment_type_split").alias("source"),
+                        pl.lit("experiment_to_common").alias("lookup_type"),
+                        pl.col("common_names").alias("targets")
+                    ]),
+                    df_exp_exploded.group_by("experiment_type_split").agg([
+                        pl.col("current_status").drop_nulls().unique().alias("statuses")
+                    ]).select([
+                        pl.col("experiment_type_split").alias("source"),
+                        pl.lit("experiment_to_status").alias("lookup_type"),
+                        pl.col("statuses").alias("targets")
+                    ])
                 ])
-            ])
 
-        # collect all lookup queries
-        if lookup_queries:
-            combined_lookups = pl.concat(lookup_queries).collect()
+            # collect all lookup queries
+            if lookup_queries:
+                combined_lookups = pl.concat(lookup_queries).collect()
 
-            # build lookup dictionary from results
-            for row in combined_lookups.iter_rows(named=True):
-                lookup_type = row["lookup_type"]
-                source = row["source"]
-                targets = set(row["targets"]) if row["targets"] is not None else set()
+                # build lookup dictionary from results
+                for row in combined_lookups.iter_rows(named=True):
+                    lookup_type = row["lookup_type"]
+                    source = row["source"]
+                    targets = set(row["targets"]) if row["targets"] is not None else set()
 
-                if lookup_type not in lookup_tables:
-                    lookup_tables[lookup_type] = {}
-                lookup_tables[lookup_type][source] = targets
+                    if lookup_type not in lookup_tables:
+                        lookup_tables[lookup_type] = {}
+                    lookup_tables[lookup_type][source] = targets
 
-    print("checklist_selection_order ---> ", checklist_selection_order)
+        print("checklist_selection_order ---> ", checklist_selection_order)
 
-    # allowed sets
-    allowed_orgs = set(all_values['all_organisms'])
-    allowed_common = set(all_values['all_common_names'])
-    allowed_current_status = set(all_values['all_current_status'])
-    allowed_experiment_type = set(all_values['all_experiment_type'])
+        # allowed sets
+        allowed_orgs = set(all_values['all_organisms'])
+        allowed_common = set(all_values['all_common_names'])
+        allowed_current_status = set(all_values['all_current_status'])
+        allowed_experiment_type = set(all_values['all_experiment_type'])
 
-    def calculate_allowed_options_optimized(selected_values, lookup_type_prefix, allowed_sets):
-        if not selected_values:
-            return
+        def calculate_allowed_options_optimized(selected_values, lookup_type_prefix, allowed_sets):
+            if not selected_values:
+                return
 
-        target_types = ["organism", "common", "status", "experiment"]
-        target_keys = ["organisms.organism", "common_name", "current_status", "experiment_type"]
+            target_types = ["organism", "common", "status", "experiment"]
+            target_keys = ["organisms.organism", "common_name", "current_status", "experiment_type"]
 
-        for target_type, target_key in zip(target_types, target_keys):
-            if target_type == lookup_type_prefix.split("_")[0]:
-                continue
+            for target_type, target_key in zip(target_types, target_keys):
+                if target_type == lookup_type_prefix.split("_")[0]:
+                    continue
 
-            lookup_key = f"{lookup_type_prefix}_to_{target_type}"
-            if lookup_key not in lookup_tables:
-                continue
+                lookup_key = f"{lookup_type_prefix}_to_{target_type}"
+                if lookup_key not in lookup_tables:
+                    continue
 
-            if selected_values:
-                result_targets = set()
-                for value in selected_values:
-                    value_targets = lookup_tables[lookup_key].get(value, set())
-                    result_targets.update(value_targets)  # UNION = OR logic
+                if selected_values:
+                    result_targets = set()
+                    for value in selected_values:
+                        value_targets = lookup_tables[lookup_key].get(value, set())
+                        result_targets.update(value_targets)  # UNION = OR logic
 
-                # Apply AND logic between different checklists
-                allowed_sets[target_key].intersection_update(result_targets)
+                    # Apply AND logic between different checklists
+                    allowed_sets[target_key].intersection_update(result_targets)
 
-    selection_configs = {
-        "selected_organisms": ("organism", selected_organisms),
-        "selected_common_names": ("common", selected_common_names),
-        "selected_current_status": ("status", selected_current_status),
-        "selected_experiment_type": ("experiment", selected_experiment_type),
-    }
+        selection_configs = {
+            "selected_organisms": ("organism", selected_organisms),
+            "selected_common_names": ("common", selected_common_names),
+            "selected_current_status": ("status", selected_current_status),
+            "selected_experiment_type": ("experiment", selected_experiment_type),
+        }
 
-    allowed_sets = {
-        "organisms.organism": allowed_orgs.copy(),
-        "common_name": allowed_common.copy(),
-        "current_status": allowed_current_status.copy(),
-        "experiment_type": allowed_experiment_type.copy(),
-    }
+        allowed_sets = {
+            "organisms.organism": allowed_orgs.copy(),
+            "common_name": allowed_common.copy(),
+            "current_status": allowed_current_status.copy(),
+            "experiment_type": allowed_experiment_type.copy(),
+        }
 
-    # apply filters based on selection order
-    for selection_name in selections_list:
-        if selection_name in selection_configs:
-            lookup_prefix, values = selection_configs[selection_name]
-            calculate_allowed_options_optimized(values, lookup_prefix, allowed_sets)
+        # apply filters based on selection order
+        for selection_name in selections_list:
+            if selection_name in selection_configs:
+                lookup_prefix, values = selection_configs[selection_name]
+                calculate_allowed_options_optimized(values, lookup_prefix, allowed_sets)
 
-    # update allowed sets
-    allowed_orgs = allowed_sets["organisms.organism"]
-    allowed_common = allowed_sets["common_name"]
-    allowed_current_status = allowed_sets["current_status"]
-    allowed_experiment_type = allowed_sets["experiment_type"]
+        # update allowed sets
+        allowed_orgs = allowed_sets["organisms.organism"]
+        allowed_common = allowed_sets["common_name"]
+        allowed_current_status = allowed_sets["current_status"]
+        allowed_experiment_type = allowed_sets["experiment_type"]
 
-    # create options
-    if user_selection:
-        organism_options = create_options(all_values['all_organisms'], False, allowed_orgs)
-        common_name_options = create_options(all_values['all_common_names'], False, allowed_common)
-        current_status_options = create_options(all_values['all_current_status'], False, allowed_current_status)
-        experiment_type_options = create_options(all_values['all_experiment_type'], False, allowed_experiment_type)
-    else:
-        organism_options = create_options(all_values['all_organisms'])
-        common_name_options = create_options(all_values['all_common_names'])
-        current_status_options = create_options(all_values['all_current_status'])
-        experiment_type_options = create_options(all_values['all_experiment_type'])
+        # create options
+        if user_selection:
+            organism_options = create_options(all_values['all_organisms'], False, allowed_orgs)
+            common_name_options = create_options(all_values['all_common_names'], False, allowed_common)
+            current_status_options = create_options(all_values['all_current_status'], False, allowed_current_status)
+            experiment_type_options = create_options(all_values['all_experiment_type'], False, allowed_experiment_type)
+        else:
+            organism_options = create_options(all_values['all_organisms'])
+            common_name_options = create_options(all_values['all_common_names'])
+            current_status_options = create_options(all_values['all_current_status'])
+            experiment_type_options = create_options(all_values['all_experiment_type'])
 
-    # sort options
-    organism_options.sort(key=lambda x: (x["value"] not in (selected_organisms or []), x["label"].lower()))
-    common_name_options.sort(key=lambda x: (x["value"] not in (selected_common_names or []), x["label"].lower()))
-    current_status_options.sort(key=lambda x: (x["value"] not in (selected_current_status or []), x["label"].lower()))
-    experiment_type_options.sort(key=lambda x: (x["value"] not in (selected_experiment_type or []), x["label"].lower()))
+        # sort options
+        organism_options.sort(key=lambda x: (x["value"] not in (selected_organisms or []), x["label"].lower()))
+        common_name_options.sort(key=lambda x: (x["value"] not in (selected_common_names or []), x["label"].lower()))
+        current_status_options.sort(key=lambda x: (x["value"] not in (selected_current_status or []), x["label"].lower()))
+        experiment_type_options.sort(key=lambda x: (x["value"] not in (selected_experiment_type or []), x["label"].lower()))
 
-    return current_status_options, common_name_options, organism_options, experiment_type_options
+        return current_status_options, common_name_options, organism_options, experiment_type_options
+    except Exception as e:
+        import traceback
+        logger.error("Error in .collect():\n" + traceback.format_exc())
+        raise
 
 
 @callback(
