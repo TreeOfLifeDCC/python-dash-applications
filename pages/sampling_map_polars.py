@@ -976,24 +976,19 @@ def build_map(
     project_name,
     selected_geotags
 ):
-    # Add this debugging block at the very start
-    logger.info("=== CALLBACK DEBUG START ===")
-    logger.info(f"selected_organisms type: {type(selected_organisms)}, value: {repr(selected_organisms)}")
-    logger.info(f"selected_common_names type: {type(selected_common_names)}, value: {repr(selected_common_names)}")
-    logger.info(f"selected_current_status type: {type(selected_current_status)}, value: {repr(selected_current_status)}")
-    logger.info(f"selected_experiment_types type: {type(selected_experiment_types)}, value: {repr(selected_experiment_types)}")
-    logger.info(f"project_name type: {type(project_name)}, value: {repr(project_name)}")
-    logger.info(f"selected_geotags type: {type(selected_geotags)}, value: {repr(selected_geotags)}")
-    logger.info("=== CALLBACK DEBUG END ===")
-
     try:
-        # Add input validation and debugging
-        logger.info(f"build_map called with project_name: {project_name}")
-        logger.info(
-            f"Filters - organisms: {selected_organisms}, common_names: {selected_common_names}, status: {selected_current_status}, experiment_types: {selected_experiment_types}")
+        # Add input validation and debugging - use print for GCP visibility
+        print(f"=== CALLBACK DEBUG: build_map called ===")
+        print(f"project_name: {repr(project_name)}")
+        print(f"selected_organisms: {repr(selected_organisms)}")
+        print(f"selected_common_names: {repr(selected_common_names)}")
+        print(f"selected_current_status: {repr(selected_current_status)}")
+        print(f"selected_experiment_types: {repr(selected_experiment_types)}")
+        print(f"selected_geotags: {repr(selected_geotags)}")
+        print("=== END CALLBACK DEBUG ===")
 
         if not project_name or project_name not in DATASETS:
-            logger.warning(f"Invalid project_name: {project_name}")
+            print(f"Invalid project_name: {project_name}")
             return create_empty_map()
 
         # Add timeout protection for lazy operations
@@ -1019,9 +1014,10 @@ def build_map(
                 clean_geotags = [str(tag).strip() for tag in selected_geotags if
                                  tag is not None and str(tag).strip() != ""]
                 if clean_geotags:
-                    logger.info(f"Applying geotag filter: {clean_geotags}")
+                    print(f"Applying geotag filter: {clean_geotags}")
                     df_lazy = df_lazy.filter(pl.col("geotag").is_in(clean_geotags))
 
+            # Define and validate filter configurations
             filter_configs = [
                 ("organisms.organism", selected_organisms),
                 ("common_name", selected_common_names),
@@ -1029,17 +1025,25 @@ def build_map(
                 ("experiment_type", selected_experiment_types),
             ]
 
+            print(f"Processing filters: {filter_configs}")
+
             for field, values in filter_configs:
+                print(f"Processing field: '{field}' with values: {repr(values)}")
+
+                # Validate field name exists in dataframe
+                if not field or field.strip() == "":
+                    print(f"Skipping empty field name: '{field}'")
+                    continue
+
                 # More robust validation
                 if (values is not None and
                     len(values) > 0 and
-                    field and
-                    field.strip() != "" and
                     any(v and str(v).strip() != "" for v in values)):
                     try:
                         # Filter out empty/None values
                         clean_values = [str(v).strip() for v in values if v is not None and str(v).strip() != ""]
                         if clean_values:
+                            print(f"Applying filter on '{field}' with clean values: {clean_values}")
                             df_lazy = df_lazy.filter(
                                 pl.col(field)
                                 .str.split(", ")
@@ -1047,9 +1051,12 @@ def build_map(
                                 .list.any()
                             )
                     except Exception as filter_error:
-                        logger.error(f"Filter error on field '{field}' with values {values}: {str(filter_error)}")
+                        print(f"Filter error on field '{field}' with values {values}: {str(filter_error)}")
+                        print(f"Filter error traceback: {traceback.format_exc()}")
                         # Continue with other filters rather than failing completely
                         pass
+                else:
+                    print(f"Skipping filter for '{field}' - no valid values")
 
             # Memory-efficient count calculation with error handling
             try:
@@ -1059,7 +1066,7 @@ def build_map(
                     pl.col("Record Count").count().alias("total_rows")
                 ]).collect()
             except Exception as stats_error:
-                logger.error(f"Error calculating stats: {str(stats_error)}")
+                print(f"Error calculating stats: {str(stats_error)}")
                 return create_empty_map()
 
             if count_stats.height > 0:
