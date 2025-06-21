@@ -1052,7 +1052,6 @@ def build_map(
                             )
                     except Exception as filter_error:
                         print(f"Filter error on field '{field}' with values {values}: {str(filter_error)}")
-                        print(f"Filter error traceback: {traceback.format_exc()}")
                         # Continue with other filters rather than failing completely
                         pass
                 else:
