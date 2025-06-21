@@ -976,8 +976,22 @@ def build_map(
     project_name,
     selected_geotags
 ):
+    # Add this debugging block at the very start
+    logger.info("=== CALLBACK DEBUG START ===")
+    logger.info(f"selected_organisms type: {type(selected_organisms)}, value: {repr(selected_organisms)}")
+    logger.info(f"selected_common_names type: {type(selected_common_names)}, value: {repr(selected_common_names)}")
+    logger.info(f"selected_current_status type: {type(selected_current_status)}, value: {repr(selected_current_status)}")
+    logger.info(f"selected_experiment_types type: {type(selected_experiment_types)}, value: {repr(selected_experiment_types)}")
+    logger.info(f"project_name type: {type(project_name)}, value: {repr(project_name)}")
+    logger.info(f"selected_geotags type: {type(selected_geotags)}, value: {repr(selected_geotags)}")
+    logger.info("=== CALLBACK DEBUG END ===")
+
     try:
-        # Add input validation
+        # Add input validation and debugging
+        logger.info(f"build_map called with project_name: {project_name}")
+        logger.info(
+            f"Filters - organisms: {selected_organisms}, common_names: {selected_common_names}, status: {selected_current_status}, experiment_types: {selected_experiment_types}")
+
         if not project_name or project_name not in DATASETS:
             logger.warning(f"Invalid project_name: {project_name}")
             return create_empty_map()
@@ -1000,9 +1014,13 @@ def build_map(
                 logger.warning(f"No data found for project: {project_name}")
                 return create_empty_map()
 
-            # Apply filters with better error handling
-            if selected_geotags:
-                df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
+            # Apply geotags filter with validation
+            if selected_geotags and len(selected_geotags) > 0:
+                clean_geotags = [str(tag).strip() for tag in selected_geotags if
+                                 tag is not None and str(tag).strip() != ""]
+                if clean_geotags:
+                    logger.info(f"Applying geotag filter: {clean_geotags}")
+                    df_lazy = df_lazy.filter(pl.col("geotag").is_in(clean_geotags))
 
             filter_configs = [
                 ("organisms.organism", selected_organisms),
@@ -1012,16 +1030,24 @@ def build_map(
             ]
 
             for field, values in filter_configs:
-                if values and len(values) > 0:
+                # More robust validation
+                if (values is not None and
+                    len(values) > 0 and
+                    field and
+                    field.strip() != "" and
+                    any(v and str(v).strip() != "" for v in values)):
                     try:
-                        df_lazy = df_lazy.filter(
-                            pl.col(field)
-                            .str.split(", ")
-                            .list.eval(pl.element().is_in(values))
-                            .list.any()
-                        )
+                        # Filter out empty/None values
+                        clean_values = [str(v).strip() for v in values if v is not None and str(v).strip() != ""]
+                        if clean_values:
+                            df_lazy = df_lazy.filter(
+                                pl.col(field)
+                                .str.split(", ")
+                                .list.eval(pl.element().is_in(clean_values))
+                                .list.any()
+                            )
                     except Exception as filter_error:
-                        logger.error(f"Filter error on field {field}: {str(filter_error)}")
+                        logger.error(f"Filter error on field '{field}' with values {values}: {str(filter_error)}")
                         # Continue with other filters rather than failing completely
                         pass
 
