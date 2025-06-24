@@ -5,4 +5,4 @@ pyarrow>=19.0.1
 gcsfs>=2025.3.2
 dash-cytoscape
 dash_extensions
-polars>=1.30.0
+polars==1.30.0
