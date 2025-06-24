@@ -1,14 +1,16 @@
 import math
+import os
 import urllib
 import numpy as np
 import plotly.express as px
-import google.auth
-from gcsfs import GCSFileSystem
+import gcsfs
 import dash
 import fsspec
 from dash import dcc, callback, Output, Input, dash_table, State, no_update, html, ctx, callback_context
 import dash_bootstrap_components as dbc
-import polars as pl # Add this import
+import polars as pl
+import google.auth
+from gcsfs import GCSFileSystem
 
 
 dash.register_page(
@@ -17,12 +19,12 @@ dash.register_page(
     title="Sampling Map",
 )
 
+
 credentials, project = google.auth.default()
 fs = GCSFileSystem(token=credentials)
 
 DATASETS = {}
 
-# map project to parquet file path
 PROJECT_PARQUET_MAP = {
     "dtol": "python_dash_data_bucket/metadata_dtol*.parquet",
     "erga": "python_dash_data_bucket/metadata_erga*.parquet",
@@ -63,7 +65,7 @@ def load_data(project_name):
         lazy_chunks = []
         for file in matching_files:
             file_path = f"gs://{file}"
-            # scan the file lazily and select only the columns needed for this page
+            # scan file lazily and select only the columns needed for this page
             lf = pl.scan_parquet(file_path).select([
                 pl.col("organisms").list.eval(
                     pl.struct([
@@ -191,7 +193,7 @@ def layout(**kwargs):
 
         # checklist section
         html.Div([
-            # Horizontal checklists
+            # horizontal checklists
             html.Div([
                 # Scientific Name Checklist
                 html.Div([
@@ -251,7 +253,6 @@ def layout(**kwargs):
                     "flex": "1"
                 }),
 
-                # spacer
                 html.Div(style={"width": "20px"}),
 
                 # Common Name Checklist
@@ -710,7 +711,7 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
         "all_experiment_type": all_experiment_type,
     }
 
-    # Apply search filters
+    # apply search filters
     search_map = {
         "all_organisms": search_organism,
         "all_common_names": search_common_name,
@@ -901,7 +902,7 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                     value_targets = lookup_tables[lookup_key].get(value, set())
                     result_targets.update(value_targets)  # UNION = OR logic
 
-                # Apply AND logic between different checklists
+                # apply AND logic between different checklists
                 allowed_sets[target_key].intersection_update(result_targets)
 
     selection_configs = {
@@ -984,6 +985,8 @@ def build_map(
         if values:
             df_lazy = df_lazy.filter(
                 pl.col(field)
+                .drop_nulls()
+                .str.strip_chars()
                 .str.split(", ")
                 .list.eval(pl.element().is_in(values))
                 .list.any()
@@ -1144,7 +1147,7 @@ def update_click_flag(click_data, selected_data, selected_organisms, selected_co
 
         return False, selected_data, True, selected_geotags, organisms
 
-    # Default case: no relevant trigger, or data unchanged
+    # default case: no relevant trigger, or data unchanged
     return no_update, prev_click_data, no_update, no_update, no_update
 
 
