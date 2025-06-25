@@ -1158,7 +1158,6 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
     Input("tab2-project-store", "data"),
     Input("rawdata-stored-selection", "data"),
     Input("rawdata-selected-date", "data"),
-    # Add these inputs to trigger the loader
     Input('pie-instrument-platform', 'clickData'),
     Input('pie-instrument-model', 'clickData'),
     Input('pie-library-construction-protocol', 'clickData'),
