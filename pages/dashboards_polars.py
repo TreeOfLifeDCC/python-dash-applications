@@ -12,6 +12,7 @@ import polars as pl
 from urllib.parse import quote, parse_qs
 import google.auth
 from gcsfs import GCSFileSystem
+from functools import lru_cache
 
 dash.register_page(
     __name__,
@@ -216,28 +217,68 @@ def preprocess_chunk(df_nested: pl.LazyFrame) -> pl.LazyFrame:
     return df_exploded
 
 
-def load_data(project_name: str):
-    if project_name not in DATASETS:
-        DATASETS[project_name] = {}
-        gcs_pattern = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
-        fs = fsspec.filesystem("gcs")
-        matching_files = fs.glob(gcs_pattern)
+def load_data(project_name):
+    if project_name in DATASETS:
+        return DATASETS[project_name]
 
-        if not matching_files:
-            raise FileNotFoundError(f"No Parquet files found for pattern: {gcs_pattern}")
+    # get url configuration
+    link_prefix = PORTAL_URL_PREFIX.get(project_name, "")
+    url_param = "tax_id" if project_name in ["erga", "gbdp"] else "organisms.organism"
 
-        lazy_chunks = []
-        for file in matching_files:
-            file_path = f"gs://{file}"
-            raw_lf = pl.scan_parquet(file_path).select([
-                "organisms", "raw_data", "current_status", "tax_id", "symbionts_status", "common_name"
-            ])
-            processed_lf = preprocess_chunk(raw_lf)
-            lazy_chunks.append(processed_lf)
+    # get file pattern and scan files
+    gcs_pattern = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
+    fs = fsspec.filesystem("gcs")
+    matching_files = fs.glob(gcs_pattern)
 
-        final_lf = pl.concat(lazy_chunks)
+    if not matching_files:
+        raise FileNotFoundError(f"No Parquet files found for pattern: {gcs_pattern}")
 
-        final_lf = final_lf.with_columns([
+    def quote_organism(o):
+        return urllib.parse.quote(str(o)) if o is not None else None
+
+    # check available columns in first file
+    first_file = f"gs://{matching_files[0]}"
+    available_columns = pl.scan_parquet(first_file).collect_schema().names()
+
+    required_columns = [
+        "organisms", "raw_data", "current_status", "tax_id", "symbionts_status", "common_name"
+    ]
+
+    select_columns = [col for col in required_columns if col in available_columns]
+
+    # lazy frames for all files
+    lazy_chunks = []
+    for file in matching_files:
+        file_path = f"gs://{file}"
+        lf = pl.scan_parquet(file_path).select(select_columns)
+        lazy_chunks.append(lf)
+
+    combined_lf = pl.concat(lazy_chunks)
+
+
+    raw_data_lf = (
+        combined_lf
+        # organisms
+        .explode("organisms")
+        .with_columns([
+            pl.col("organisms").struct.field("biosample_id").alias("organisms.biosample_id"),
+            pl.col("organisms").struct.field("organism").alias("organisms.organism"),
+            pl.col("organisms").struct.field("sex").alias("organisms.sex"),
+            pl.col("organisms").struct.field("lifestage").alias("organisms.lifestage"),
+            pl.col("organisms").struct.field("habitat").alias("organisms.habitat"),
+        ])
+
+        # raw_data
+        .explode("raw_data")
+        .with_columns([
+            pl.col("raw_data").struct.field("instrument_platform").alias("raw_data.instrument_platform"),
+            pl.col("raw_data").struct.field("instrument_model").alias("raw_data.instrument_model"),
+            pl.col("raw_data").struct.field("library_construction_protocol").alias(
+                "raw_data.library_construction_protocol"),
+            pl.col("raw_data").struct.field("first_public").alias("raw_data.first_public"),
+        ])
+
+        .with_columns([
             pl.col("organisms.sex").cast(pl.Utf8).alias("sex"),
             pl.col("organisms.lifestage").cast(pl.Utf8).alias("lifestage"),
             pl.col("organisms.habitat").cast(pl.Utf8).alias("habitat"),
@@ -245,24 +286,35 @@ def load_data(project_name: str):
             pl.col("raw_data.instrument_model").cast(pl.Utf8).alias("instrument_model"),
             pl.col("raw_data.library_construction_protocol").cast(pl.Utf8).alias("library_construction_protocol"),
             pl.col("raw_data.first_public")
-              .str.strptime(pl.Date, format="%Y-%m-%d", strict=False, exact=True)
-              .cast(pl.Datetime)
-              .alias("first_public"),
+            .str.strptime(pl.Date, format="%Y-%m-%d", strict=False, exact=True)
+            .cast(pl.Datetime)
+            .alias("first_public"),
         ])
 
-        final_lf = final_lf.with_columns(
+        # organism link
+        .with_columns(
             pl.when(pl.col("organisms.organism").is_not_null())
             .then(pl.format(
-                "[{}](https://portal.darwintreeoflife.org/data/{})",
+                "[{}]({}{})",
                 pl.col("organisms.organism"),
-                pl.col("organisms.organism").map_elements(lambda x: urllib.parse.quote(str(x)), return_dtype=pl.Utf8)
+                pl.lit(link_prefix),
+                pl.col(url_param).map_elements(quote_organism, return_dtype=pl.Utf8)
             ))
             .otherwise(pl.lit(""))
             .alias("organism_link")
         )
+    )
 
-        final_df = final_lf.collect()
-        DATASETS[project_name]["raw_data"] = final_df.clone()
+    raw_data = raw_data_lf.collect()
+
+    DATASETS[project_name] = {"raw_data": raw_data}
+
+    return DATASETS[project_name]
+
+
+@lru_cache(maxsize=10)
+def load_data_cached(project_name):
+    return load_data(project_name)
 
 
 def wrap_text_for_display(text, max_chars_per_line=15):
@@ -420,9 +472,33 @@ def layout(**kwargs):
                         "fontWeight": "bold", "color": "#394959"}),
 
         dbc.Row([
-            dbc.Col(dcc.Graph(id="pie-sex"), width=4),
-            dbc.Col(dcc.Graph(id="pie-lifestage"), width=4),
-            dbc.Col(dcc.Graph(id="pie-habitat"), width=4),
+            dbc.Col(
+                dcc.Loading(
+                    id="loading-pie-sex",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dcc.Graph(id="pie-sex")
+                ),
+                width=4
+            ),
+            dbc.Col(
+                dcc.Loading(
+                    id="loading-pie-lifestage",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dcc.Graph(id="pie-lifestage")
+                ),
+                width=4
+            ),
+            dbc.Col(
+                dcc.Loading(
+                    id="loading-pie-habitat",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dcc.Graph(id="pie-habitat")
+                ),
+                width=4
+            ),
         ], style={"marginBottom": "40px"}),
 
         html.Div(
@@ -473,9 +549,33 @@ def layout(**kwargs):
                         "fontWeight": "bold", "color": "#394959"}),
 
         dbc.Row([
-            dbc.Col(dcc.Graph(id="pie-instrument-platform"), width=4),
-            dbc.Col(dcc.Graph(id="pie-instrument-model"), width=4),
-            dbc.Col(dcc.Graph(id="pie-library-construction-protocol"), width=4),
+            dbc.Col(
+                dcc.Loading(
+                    id="loading-pie-platform",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dcc.Graph(id="pie-instrument-platform")
+                ),
+                width=4
+            ),
+            dbc.Col(
+                dcc.Loading(
+                    id="loading-pie-model",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dcc.Graph(id="pie-instrument-model")
+                ),
+                width=4
+            ),
+            dbc.Col(
+                dcc.Loading(
+                    id="loading-pie-protocol",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dcc.Graph(id="pie-library-construction-protocol")
+                ),
+                width=4
+            ),
         ], style={"marginBottom": "40px"}),
 
         # date range picker
@@ -495,7 +595,15 @@ def layout(**kwargs):
         ]),
 
         dbc.Row([
-            dbc.Col(dcc.Graph(id="time-series-graph"), width=12)
+            dbc.Col(
+                dcc.Loading(
+                    id="loading-time-series",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dcc.Graph(id="time-series-graph")
+                ),
+                width=12
+            )
         ], style={"marginBottom": "20px"}),
 
         html.Div(

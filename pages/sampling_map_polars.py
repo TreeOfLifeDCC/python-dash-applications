@@ -11,6 +11,8 @@ import dash_bootstrap_components as dbc
 import polars as pl
 import google.auth
 from gcsfs import GCSFileSystem
+from functools import lru_cache
+import hashlib
 
 
 dash.register_page(
@@ -19,6 +21,8 @@ dash.register_page(
     title="Sampling Map",
 )
 
+# os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.expanduser("~/.gcp/dash-service-key.json")
+# fs = gcsfs.GCSFileSystem(token=os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
 
 credentials, project = google.auth.default()
 fs = GCSFileSystem(token=credentials)
@@ -52,118 +56,184 @@ def extract_unique_protocols(raw_data_entry):
 
 
 def load_data(project_name):
+    link_prefix = PORTAL_URL_PREFIX.get(project_name, "")
+    url_param = "organism"
+
+    if project_name == "erga" or project_name == "gbdp":
+        url_param = "tax_id"
+
+
     if project_name not in DATASETS:
         gcs_pattern = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
 
         fs = fsspec.filesystem("gcs")
-
         matching_files = fs.glob(gcs_pattern)
 
         if not matching_files:
             raise FileNotFoundError(f"No Parquet files found for pattern: {gcs_pattern}")
 
+        # Pre-compile the URL quote function for better performance
+        def quote_organism(o):
+            return urllib.parse.quote(str(o)) if o is not None else None
+
+        # check available columns in first file to handle missing columns in subsequrnt files
+        first_file = f"gs://{matching_files[0]}"
+        available_columns = pl.scan_parquet(first_file).collect_schema().names()
+
+        # Define required columns with fallbacks
+        required_columns = [
+            "organisms",
+            "raw_data",
+            "current_status",
+            "common_name",
+            "tax_id",
+            "phylogenetic_tree",
+            "symbionts_status"
+        ]
+
+        # select list based on available columns
+        select_columns = []
+        for col in required_columns:
+            if col in available_columns:
+                select_columns.append(col)
+
+
+        # lazy frame construction
         lazy_chunks = []
         for file in matching_files:
             file_path = f"gs://{file}"
-            # scan file lazily and select only the columns needed for this page
+
             lf = pl.scan_parquet(file_path).select([
                 pl.col("organisms").list.eval(
                     pl.struct([
-                        pl.element().struct.field("biosample_id").alias("biosample_id"),
-                        pl.element().struct.field("organism").alias("organism"),
-                        pl.element().struct.field("latitude").alias("latitude"),
-                        pl.element().struct.field("longitude").alias("longitude")
+                        pl.element().struct.field("biosample_id"),
+                        pl.element().struct.field("organism"),
+                        pl.element().struct.field("latitude"),
+                        pl.element().struct.field("longitude")
                     ])
-                ).alias("organisms"),
+                ).alias("organism_data"),
+
+                # extract protocols
                 pl.col("raw_data").list.eval(
-                    pl.element().struct.field("library_construction_protocol")).alias("raw_data_protocols"),
-                # keep other fields as they are
-                "raw_data",
-                "current_status",
-                "common_name",
-                "tax_id",
-                "symbionts_status",
-                "phylogenetic_tree"
+                    pl.element().struct.field("library_construction_protocol")
+                ).list.drop_nulls().list.unique().alias("protocols"),
+
+                # add other columns
+                *[col for col in select_columns if col not in ["organisms", "raw_data"]]
             ])
             lazy_chunks.append(lf)
 
-        final_lf = pl.concat(lazy_chunks)
+        # combine all files
+        combined_lf = pl.concat(lazy_chunks)
 
-        final_lf = (
-            final_lf
-            .explode("organisms")
-            .unnest("organisms")
-            .with_columns(
-                pl.when(pl.col("raw_data_protocols").list.len() > 0)
-                .then(
-                    pl.col("raw_data_protocols")
-                    .list.unique()
-                    .list.filter(
-                        (pl.element().is_not_null()) & (pl.element() != "")
-                    )
-                )
+        # process data
+        processed_lf = (
+            combined_lf
+            .explode("organism_data")
+            .unnest("organism_data")
+
+            .with_columns([
+                pl.when(pl.col("protocols").list.len() > 0)
+                .then(pl.col("protocols").list.filter(pl.element() != ""))
                 .otherwise([])
-                .alias("experiment_type")
+                .alias("experiment_types")
+            ])
+            .explode("experiment_types")
+
+            .with_columns([
+                pl.col("latitude").cast(pl.Float64, strict=False).alias("lat"),
+                pl.col("longitude").cast(pl.Float64, strict=False).alias("lon")
+            ])
+
+            # filter invalid coordinates
+            .filter(
+                pl.col("lat").is_between(-90, 90, closed="both") &
+                pl.col("lon").is_between(-180, 180, closed="both") &
+                pl.col("lat").is_not_null() &
+                pl.col("lon").is_not_null()
             )
 
-            .explode("experiment_type")
-            .with_columns(
-                pl.col("latitude").cast(pl.Float64, strict=False).alias("lat"),
-                pl.col("longitude").cast(pl.Float64, strict=False).alias("lon"),
+            # add other columns
+            .with_columns([
                 pl.col("phylogenetic_tree").struct.field("kingdom").struct.field("scientific_name").alias("Kingdom"),
-            )
-            # remove invalid geo-coordinates
-            .filter(
-                pl.col("lat").is_between(-90, 90) & pl.col("lon").is_between(-180, 180)
-            )
-            # create geotag and organism link
-            .with_columns(
-                (pl.col("lat").cast(pl.Utf8) + "," + pl.col("lon").cast(pl.Utf8)).alias("geotag"),
+
+                # geotag
+                pl.concat_str([
+                    pl.col("lat").cast(pl.Utf8),
+                    pl.lit(","),
+                    pl.col("lon").cast(pl.Utf8)
+                ]).alias("geotag"),
+
+                # organism link
                 pl.when(pl.col("organism").is_not_null())
-                .then(pl.format(
-                    "[{}](https://portal.darwintreeoflife.org/data/{})",
-                    pl.col("organism"),
-                    pl.col("organism").map_elements(lambda o: urllib.parse.quote(str(o)), return_dtype=pl.Utf8)
-                ))
+                .then(
+                    pl.concat_str([
+                        pl.lit("["),
+                        pl.col("organism"),
+                        pl.lit("](" + link_prefix),
+                        pl.col(url_param).map_elements(quote_organism, return_dtype=pl.Utf8),
+                        pl.lit(")")
+                    ])
+                )
                 .otherwise(None)
                 .alias("organism_link")
-            )
+            ])
         )
 
         df_data = (
-            final_lf
-            .rename({
-                "biosample_id": "organisms.biosample_id",
-                "organism": "organisms.organism",
-                "latitude": "organisms.latitude",
-                "longitude": "organisms.longitude",
-            })
+            processed_lf
+            .select([
+                pl.col("biosample_id").alias("organisms.biosample_id"),
+                pl.col("organism").alias("organisms.organism"),
+                pl.col("latitude").alias("organisms.latitude"),
+                pl.col("longitude").alias("organisms.longitude"),
+                pl.col("lat"),
+                pl.col("lon"),
+                pl.col("Kingdom"),
+                pl.col("common_name"),
+                pl.col("current_status"),
+                pl.col("tax_id"),
+                pl.col("symbionts_status"),
+                pl.col("phylogenetic_tree"),
+                pl.col("experiment_types").alias("experiment_type"),
+                pl.col("geotag"),
+                pl.col("organism_link")
+            ])
             .collect()
         )
 
+        # create grouped data
         grouped_data = (
-            final_lf
+            processed_lf
             .group_by("geotag")
-            .agg(
+            .agg([
                 pl.col("lat").first(),
                 pl.col("lon").first(),
-                pl.col("biosample_id").drop_nulls().unique().str.concat(", "),
-                pl.col("organism").drop_nulls().unique().str.concat(", "),
-                pl.col("Kingdom").drop_nulls().unique(),
-                pl.col("common_name").drop_nulls().unique().str.concat(", "),
-                pl.col("current_status").drop_nulls().unique().str.concat(", "),
-                pl.col("experiment_type").drop_nulls().unique().str.concat(", "),
-                pl.col("organism").n_unique().alias("Record Count"),
-            )
+                pl.col("biosample_id").drop_nulls().unique().str.join(", ").alias("organisms.biosample_id"),
+                pl.col("organism").drop_nulls().unique().str.join(", ").alias("organisms.organism"),
+                pl.col("Kingdom").drop_nulls().unique().alias("Kingdom"),
+                pl.col("common_name").drop_nulls().unique().str.join(", "),
+                pl.col("current_status").drop_nulls().unique().str.join(", "),
+                pl.col("experiment_types").drop_nulls().unique().str.join(", ").alias("experiment_type"),
+                pl.col("organism").n_unique().alias("Record Count")
+            ])
             .explode("Kingdom")
-            .rename({
-                "biosample_id": "organisms.biosample_id",
-                "organism": "organisms.organism",
-            })
             .collect()
         )
 
         DATASETS[project_name] = {"df_data": df_data, "grouped_data": grouped_data}
+
+    return DATASETS[project_name]
+
+
+
+
+
+@lru_cache(maxsize=10)
+def load_data_cached(project_name):
+    """Cached version of load_data"""
+    return load_data(project_name)
+
 
 def layout(**kwargs):
     project_name = kwargs.get("projectName", "dtol")
@@ -1207,7 +1277,7 @@ def build_table(click_flag_value, selection_flag_value, selected_data, click_dat
         .cast(pl.Utf8)
         .str.strip_chars()
         .unique()
-        .str.concat(", ")
+        .str.join(", ")
         .alias("experiment_type"),
 
         # take first values for other columns
