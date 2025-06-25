@@ -827,6 +827,8 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
 
 
 
+# Replace your existing table callbacks with these fixed versions:
+
 @callback(
     Output("dashboard-datatable-paging", "data"),
     Output("dashboard-datatable-paging", "page_count"),
@@ -836,8 +838,14 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
     Input('dashboard-datatable-paging', "page_size"),
     Input("project-store", "data"),
     Input("stored-selection", "data"),
+    # Add these pie chart inputs to trigger the loader
+    Input("pie-sex", "clickData"),
+    Input("pie-lifestage", "clickData"),
+    Input("pie-habitat", "clickData"),
+    Input("reset-all-dashboards", "n_clicks"),
 )
-def build_metadata_table(page_current: int, page_size: int, project_name: str, stored_selection: dict):
+def build_metadata_table(page_current: int, page_size: int, project_name: str, stored_selection: dict,
+                        pie_sex_click, pie_lifestage_click, pie_habitat_click, reset_clicks):
     filtered_df = DATASETS[project_name]["raw_data"].clone()
     stored_selection = stored_selection or {"sex": None, "lifestage": None, "habitat": None}
 
@@ -894,6 +902,7 @@ def build_metadata_table(page_current: int, page_size: int, project_name: str, s
         total_pages,
         page_current
     )
+
 
 
 # **** Tab 2 ***#
@@ -1149,9 +1158,19 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
     Input("tab2-project-store", "data"),
     Input("rawdata-stored-selection", "data"),
     Input("rawdata-selected-date", "data"),
+    # Add these inputs to trigger the loader
+    Input('pie-instrument-platform', 'clickData'),
+    Input('pie-instrument-model', 'clickData'),
+    Input('pie-library-construction-protocol', 'clickData'),
+    Input('time-series-graph', 'clickData'),
+    Input('date-range-picker', 'start_date'),
+    Input('date-range-picker', 'end_date'),
+    Input("tab2-reset-all-dashboards", "n_clicks"),
 )
 def build_rawdata_table(page_current: int, page_size: int, project_name: str,
-                       selected_pie_data: dict, selected_date):
+                       selected_pie_data: dict, selected_date,
+                       platform_click, model_click, protocol_click, time_click,
+                       start_date, end_date, reset_clicks):
     filtered_df = DATASETS[project_name]["raw_data"].clone()
 
     # apply pie chart filters
@@ -1178,7 +1197,6 @@ def build_rawdata_table(page_current: int, page_size: int, project_name: str,
                 end_parsed = pl.lit(end_date).str.to_date()
                 filtered_df = filtered_df.filter(pl.col("first_public").dt.date() <= end_parsed)
 
-
     # group by biosample and aggregate
     grouped_df = filtered_df.group_by("organisms.biosample_id").agg([
         pl.col("common_name").first().alias("common_name"),
@@ -1194,7 +1212,6 @@ def build_rawdata_table(page_current: int, page_size: int, project_name: str,
         url_param = "tax_id"
     else:
         url_param = "organisms.organism"
-
 
     grouped_df = grouped_df.with_columns(
         pl.when(pl.col("organisms.organism").is_not_null())
