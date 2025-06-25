@@ -4,11 +4,12 @@ from dash import dcc, html, Output, Input, State, dash_table, callback_context, 
 from dash.exceptions import PreventUpdate
 import dash_cytoscape as cyto
 from dash_extensions import EventListener
-import pandas as pd
 from google.cloud import storage
 import io
 import dash_bootstrap_components as dbc
 from urllib.parse import quote, parse_qs
+import polars as pl
+import json
 
 dash.register_page(__name__, path="/cytoscape", name="Cytoscape Tree")
 
@@ -149,50 +150,71 @@ def get_subtree_nodes(node_id, elements):
     return subtree_ids
 
 
-def load_data(project_name):
-    if project_name not in DATASETS:
-        gcs_pattern = PROJECT_PARQUET_MAP[project_name]
-        bucket, rest = gcs_pattern.split("/", 1)
-        prefix = rest.replace("*", "")
-        client = storage.Client.create_anonymous_client()
-        blobs = client.list_blobs(bucket, prefix=prefix)
+def load_data_polars(project_name):
+    if project_name in DATASETS:
+        return DATASETS[project_name]
 
-        pieces = []
-        for blob in blobs:
-            if not blob.name.endswith(".parquet"):
-                continue
-            data = blob.download_as_bytes()
-            df_chunk = pd.read_parquet(
-                io.BytesIO(data),
-                engine="pyarrow",
-                columns=[
-                    "scientific_name",
-                    "common_name",
-                    "current_status",
-                    "symbionts_status",
-                    "phylogenetic_tree",
-                    "tax_id",
-                ]
+    gcs_pattern = PROJECT_PARQUET_MAP[project_name]
+    bucket_name, rest = gcs_pattern.split("/", 1)
+    prefix = rest.replace("*", "")
+
+    client = storage.Client.create_anonymous_client()
+    bucket = client.bucket(bucket_name)
+
+    dfs = []
+    for blob in client.list_blobs(bucket, prefix=prefix):
+        if not blob.name.endswith(".parquet"):
+            continue
+        data = io.BytesIO(blob.download_as_bytes())
+        df = pl.read_parquet(
+            data,
+            columns=[
+                "scientific_name",
+                "common_name",
+                "current_status",
+                "symbionts_status",
+                "phylogenetic_tree",
+                "tax_id",
+            ],
+        )
+
+        if df["phylogenetic_tree"].dtype == pl.Utf8:
+            df = df.with_columns(
+                pl.col("phylogenetic_tree")
+                .apply(json.loads)
+                .alias("phylogenetic_tree")
             )
-            pieces.append(df_chunk)
 
-        if not pieces:
-            raise FileNotFoundError(f"No parquet files in gs://{bucket}/{rest}")
-        df = pd.concat(pieces, ignore_index=True)
+        for rank in RANKS:
+            df = df.with_columns([
+                pl.col("phylogenetic_tree")
+                  .map_elements(lambda d: d.get(rank, {}).get("scientific_name", "Not Specified"),
+                                return_dtype=pl.Utf8)
+                  .alias(f"{rank}_sci"),
+                pl.col("phylogenetic_tree")
+                  .map_elements(lambda d: d.get(rank, {}).get("common_name", "Not Specified"),
+                                return_dtype=pl.Utf8)
+                  .alias(f"{rank}_com"),
+            ])
+        dfs.append(df)
 
-        def extract_names(tree, field):
-            return [tree.get(rank, {}).get(field, "Not Specified") for rank in RANKS]
+    df_all = pl.concat(dfs, how="vertical")
 
-        df["phylogenetic_tree_scientific_names"] = df["phylogenetic_tree"].apply(lambda t: extract_names(t, "scientific_name"))
-        df["phylogenetic_tree_common_names"] = df["phylogenetic_tree"].apply(lambda t: extract_names(t, "common_name"))
-        DATASETS[project_name] = df
+    df_all = df_all.with_columns([
+        pl.concat_list([pl.col(f"{r}_sci") for r in RANKS])
+        .alias("phylogenetic_tree_scientific_names"),
 
+        pl.concat_list([pl.col(f"{r}_com") for r in RANKS])
+        .alias("phylogenetic_tree_common_names"),
+    ])
+
+    DATASETS[project_name] = df_all
     return DATASETS[project_name]
 
 
 def init_project(project_name):
-    df = load_data(project_name)
-    records = df.to_dict(orient="records")
+    df = load_data_polars(project_name)
+    records = df.to_dicts()
 
     all_sci = sorted({
         name
@@ -626,8 +648,8 @@ def master(
 
     records_df = DATASETS.get(project_name)
     if records_df is None:
-        records_df = load_data(project_name)
-    records = records_df.to_dict(orient="records")
+        records_df = load_data_polars(project_name)
+    records = records_df.to_dicts()
     tree_data = full_tree_data
 
     sci_sel = [s for s in (sci_sel or []) if s != "Not Specified"]
