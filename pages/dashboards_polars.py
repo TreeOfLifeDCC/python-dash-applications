@@ -827,8 +827,6 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
 
 
 
-# Replace your existing table callbacks with these fixed versions:
-
 @callback(
     Output("dashboard-datatable-paging", "data"),
     Output("dashboard-datatable-paging", "page_count"),
@@ -838,7 +836,6 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
     Input('dashboard-datatable-paging', "page_size"),
     Input("project-store", "data"),
     Input("stored-selection", "data"),
-    # Add these pie chart inputs to trigger the loader
     Input("pie-sex", "clickData"),
     Input("pie-lifestage", "clickData"),
     Input("pie-habitat", "clickData"),
