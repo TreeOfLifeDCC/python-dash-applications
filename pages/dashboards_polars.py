@@ -1,18 +1,16 @@
 import math
-import os
 import urllib
-import pandas as pd
 import plotly.express as px
-import gcsfs
 import dash
-import fsspec
 from dash import dcc, callback, Output, Input, dash_table, State, html, ctx
 import dash_bootstrap_components as dbc
 import polars as pl
-from urllib.parse import quote, parse_qs
-import google.auth
-from gcsfs import GCSFileSystem
-from functools import lru_cache
+from urllib.parse import quote
+
+from dash.exceptions import PreventUpdate
+from google.cloud import bigquery
+from datetime import datetime
+from google.oauth2 import service_account
 
 dash.register_page(
     __name__,
@@ -20,20 +18,22 @@ dash.register_page(
     title="Dashboards",
 )
 
-# os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.expanduser("~/.gcp/dash-service-key.json")
-# fs = gcsfs.GCSFileSystem(token=os.environ["GOOGLE_APPLICATION_CREDENTIALS"])
+# initialize BigQuery client
+client = bigquery.Client(
+    project="prj-ext-prod-biodiv-data-in"
+)
 
-credentials, project = google.auth.default()
-fs = GCSFileSystem(token=credentials)
 
-DATASETS = {}
+# cache for pre-aggregated data
+METADATA_AGGREGATED_DATA = {}
+RAWDATA_AGGREGATED_DATA = {}
 
-# map project to parquet file path
-PROJECT_PARQUET_MAP = {
-    "dtol": "python_dash_data_bucket/metadata_dtol*.parquet",
-    "erga": "python_dash_data_bucket/metadata_erga*.parquet",
-    "asg": "python_dash_data_bucket/metadata_asg*.parquet",
-    "gbdp": "python_dash_data_bucket/metadata_gbdp*.parquet"
+
+PROJECT_TABLE_MAP = {
+    "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
+    "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
+    "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
+    "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
 }
 
 PORTAL_URL_PREFIX = {
@@ -43,278 +43,608 @@ PORTAL_URL_PREFIX = {
     "gbdp": "https://www.ebi.ac.uk/biodiversity/data_portal/"
 }
 
-def limit_grouped_data(df: pl.DataFrame, col: str, df_filtered: pl.DataFrame) -> pl.DataFrame:
-    top_n = 10
+# get base data
+def build_base_data_cte(project_name: str, filters: dict,  tab: str) -> str:
+    table_name = PROJECT_TABLE_MAP.get(project_name, PROJECT_TABLE_MAP["dtol"])
 
-    # first_public (group by year)
-    if col == "first_public":
-        df = df.with_columns(
-            pl.col("first_public").dt.year().cast(pl.Utf8).alias("first_public_year")
-        )
-
-        df = df.group_by("first_public_year").agg(
-            pl.col("Record Count").sum().alias("Record Count")
-        ).sort(by="first_public_year").head(10)
-
-        # Use first_public_year as the category column
-        col = "first_public_year"
-
-    # "Others" category
-    if len(df) > top_n:
-        top_rows = df.head(top_n)
-        other_rows = df.slice(top_n, len(df) - top_n)
-
-        def concat_unique_polars(series):
-            all_values = []
-            for val in series:
-                if val is not None:
-                    items = str(val).split(',')
-                    all_values.extend([item.strip() for item in items if item.strip()])
-            return ", ".join(set(all_values))
-
-        # get biosample IDs from other_rows
-        other_biosample_ids = set()
-        for val in other_rows.select("organisms.biosample_id").to_series():
-            if val is not None:
-                ids = [x.strip() for x in str(val).split(",") if x.strip()]
-                other_biosample_ids.update(ids)
-
-        # filter the raw data using biosample IDs from "Others"
-        filtered_df = df_filtered.filter(
-            pl.col("organisms.biosample_id").is_in(list(other_biosample_ids))
-        )
-
-        grouped_df = filtered_df.group_by("organisms.biosample_id").agg([
-            pl.col("common_name").first(),
-            pl.col("current_status").first(),
-            pl.col("symbionts_status").first(),
-            pl.col("organisms.organism").first()
-        ])
-
-        # create organism links
-        grouped_df = grouped_df.with_columns(
-            pl.when(pl.col("organisms.organism").is_not_null())
-            .then(
-                pl.col("organisms.organism").map_elements(
-                    lambda x: f"[{x}](https://portal.darwintreeoflife.org/data/{urllib.parse.quote(str(x))})",
-                    return_dtype=pl.Utf8
-                )
-            )
-            .otherwise(pl.lit(""))
-            .alias("organism_link")
-        )
-
-        # remove duplicates
-        grouped_df = grouped_df.unique(subset=[
-            "organism_link",
-            "common_name",
-            "current_status",
-            "symbionts_status"
-        ])
-
-        record_count = len(grouped_df)
-
-        # create the "Others" row with the same column structure as top_rows
-        other_biosample_id = concat_unique_polars(other_rows.select("organisms.biosample_id").to_series())
-        other_organism = concat_unique_polars(other_rows.select("organisms.organism").to_series())
-        other_sex = concat_unique_polars(other_rows.select("organisms.sex").to_series())
-        other_current_status = concat_unique_polars(other_rows.select("current_status").to_series())
-
-        other_row_data = {}
-
-        # initialize with same columns as top_rows
-        for column in top_rows.columns:
-            if column == col:
-                other_row_data[column] = ["Others"]
-            elif column == "organisms.biosample_id":
-                other_row_data[column] = [other_biosample_id]
-            elif column == "organisms.organism":
-                other_row_data[column] = [other_organism]
-            elif column == "organisms.sex":
-                other_row_data[column] = [other_sex]
-            elif column == "current_status":
-                other_row_data[column] = [other_current_status]
-            elif column == "Record Count":
-                other_row_data[column] = [record_count]
-            else:
-                other_row_data[column] = [None]
-
-        other_row_df = pl.DataFrame(other_row_data)
-
-        # ensure data types match between the dataframes before concatenating
-        for col_name in top_rows.columns:
-            if col_name in other_row_df.columns:
-                top_dtype = top_rows[col_name].dtype
-                other_dtype = other_row_df[col_name].dtype
-
-                # cast other_row_df column to match top_rows dtype
-                if top_dtype != other_dtype:
-                    other_row_df = other_row_df.with_columns(
-                        pl.col(col_name).cast(top_dtype).alias(col_name)
-                    )
-
-        # concatenate top rows with Others row
-        result_df = pl.concat([top_rows, other_row_df], how="vertical")
-
-    else:
-        result_df = df
-
-    # cast to String/Utf8 and remove whitespace
-    if col in result_df.columns and result_df[col].dtype != pl.Utf8:
-        result_df = result_df.with_columns(pl.col(col).cast(pl.Utf8))
-
-    # remove whitespace from string columns
-    for c in result_df.columns:
-        if result_df[c].dtype == pl.Utf8:
-            result_df = result_df.with_columns(pl.col(c).str.strip_chars().alias(c))
-
-    return result_df
+    where_conditions = []
+    for key, value in filters.items():
+        if value and value != "NULL":
+            if tab == 'metadata':
+                if key == "sex":
+                    where_conditions.append(f"organism.sex = '{value}'")
+                elif key == "lifestage":
+                    where_conditions.append(f"organism.lifestage = '{value}'")
+                elif key == "habitat":
+                    where_conditions.append(f"organism.habitat = '{value}'")
+            elif tab == "rawdata":
+                if key == "instrument_platform":
+                    where_conditions.append(f"raw_data_item.instrument_platform = '{value}'")
+                elif key == "instrument_model":
+                    where_conditions.append(f"raw_data_item.instrument_model = '{value}'")
+                elif key == "library_construction_protocol":
+                    where_conditions.append(f"raw_data_item.library_construction_protocol = '{value}'")
+                elif key == "date_filter":
+                    # date filtering
+                    date_info = value
+                    if isinstance(date_info, str):
+                        where_conditions.append(
+                            f"SAFE.PARSE_DATE('%Y-%m-%d', raw_data_item.first_public) = '{date_info}'")
+                    elif isinstance(date_info, dict):
+                        start_date = date_info.get("start")
+                        end_date = date_info.get("end")
+                        if start_date:
+                            where_conditions.append(
+                                f"SAFE.PARSE_DATE('%Y-%m-%d', raw_data_item.first_public) >= '{start_date}'")
+                        if end_date:
+                            where_conditions.append(
+                                f"SAFE.PARSE_DATE('%Y-%m-%d', raw_data_item.first_public) <= '{end_date}'")
 
 
-def generate_grouped_data(df: pl.LazyFrame, group_by_col: str) -> pl.LazyFrame:
-    df = df.filter(pl.col(group_by_col).is_not_null())
-    grouped_data = (df.group_by(group_by_col)).agg([
-                          pl.col("organisms.biosample_id")
-                            .map_elements(lambda x: ", ".join(list(set(val for val in x if val is not None))), return_dtype=pl.Utf8)
-                            .alias("organisms.biosample_id"),
-                          pl.col("organisms.organism")
-                            .map_elements(lambda x: ", ".join(list(set(val for val in x if val is not None))), return_dtype=pl.Utf8)
-                            .alias("organisms.organism"),
-                          pl.col("organisms.sex")
-                            .map_elements(lambda x: ", ".join(list(set(val for val in x if val is not None))), return_dtype=pl.Utf8)
-                            .alias("organisms.sex"),
-                          pl.col("current_status")
-                            .map_elements(lambda x: ", ".join(list(set(val for val in x if val is not None))), return_dtype=pl.Utf8)
-                            .alias("current_status"),
-                          pl.col("symbionts_status")
-                            .map_elements(lambda x: ", ".join(list(set(val for val in x if val is not None))), return_dtype=pl.Utf8)
-                            .alias("symbionts_status"),
-                          pl.col("organisms.organism").n_unique().alias("Record Count"),
-                          pl.col("organisms.biosample_id").n_unique().alias("BioSample IDs Count")
-                      ]).sort("Record Count", descending=True)
+    where_clause = ""
+    if where_conditions:
+        where_clause = "AND " + " AND ".join(where_conditions)
 
-    return grouped_data
+    select_fields = """
+        main.current_status,
+        main.tax_id,
+        main.symbionts_status,
+        main.common_name,
+        organism.biosample_id,
+        organism.organism,
+        organism.sex,
+        organism.lifestage,
+        organism.habitat,
+        raw_data_item.instrument_platform,
+        raw_data_item.instrument_model,
+        raw_data_item.library_construction_protocol,
+        CASE
+         WHEN raw_data_item.first_public IS NOT NULL THEN
+          SAFE.PARSE_DATE('%Y-%m-%d', raw_data_item.first_public)
+         ELSE NULL
+        END as first_public"""
 
-
-def preprocess_chunk(df_nested: pl.LazyFrame) -> pl.LazyFrame:
-    # explode organisms and flatten fields
-    df_exploded = df_nested.explode("organisms").with_columns([
-        pl.col("organisms").struct.field("biosample_id").alias("organisms.biosample_id"),
-        pl.col("organisms").struct.field("organism").alias("organisms.organism"),
-        pl.col("organisms").struct.field("sex").alias("organisms.sex"),
-        pl.col("organisms").struct.field("lifestage").alias("organisms.lifestage"),
-        pl.col("organisms").struct.field("habitat").alias("organisms.habitat"),
-    ]).drop("organisms")
-
-    # explode raw_data and flatten fields
-    df_exploded = df_exploded.explode("raw_data").with_columns([
-        pl.col("raw_data").struct.field("instrument_platform").alias("raw_data.instrument_platform"),
-        pl.col("raw_data").struct.field("instrument_model").alias("raw_data.instrument_model"),
-        pl.col("raw_data").struct.field("library_construction_protocol").alias("raw_data.library_construction_protocol"),
-        pl.col("raw_data").struct.field("first_public").alias("raw_data.first_public"),
-    ]).drop("raw_data")
-
-    return df_exploded
+    return f"""
+    WITH base_data AS (
+      SELECT
+        {select_fields}
+      FROM `{table_name}` as main,
+      UNNEST(main.organisms) as organism
+      LEFT JOIN UNNEST(main.raw_data) as raw_data_item
+      ON TRUE
+      WHERE organism.biosample_id IS NOT NULL
+        AND organism.organism IS NOT NULL
+        {where_clause}
+    )"""
 
 
-def load_data(project_name):
-    if project_name in DATASETS:
-        return DATASETS[project_name]
+# get complete CTE chain for table queries (data + count)
+def build_table_queries_cte(project_name: str, filters: dict, tab) -> str:
+    base_cte = build_base_data_cte(project_name, filters, tab)
 
-    # get url configuration
-    link_prefix = PORTAL_URL_PREFIX.get(project_name, "")
-    url_param = "tax_id" if project_name in ["erga", "gbdp"] else "organisms.organism"
-
-    # get file pattern and scan files
-    gcs_pattern = PROJECT_PARQUET_MAP.get(project_name, PROJECT_PARQUET_MAP["dtol"])
-    fs = fsspec.filesystem("gcs")
-    matching_files = fs.glob(gcs_pattern)
-
-    if not matching_files:
-        raise FileNotFoundError(f"No Parquet files found for pattern: {gcs_pattern}")
-
-    def quote_organism(o):
-        return urllib.parse.quote(str(o)) if o is not None else None
-
-    # check available columns in first file
-    first_file = f"gs://{matching_files[0]}"
-    available_columns = pl.scan_parquet(first_file).collect_schema().names()
-
-    required_columns = [
-        "organisms", "raw_data", "current_status", "tax_id", "symbionts_status", "common_name"
-    ]
-
-    select_columns = [col for col in required_columns if col in available_columns]
-
-    # lazy frames for all files
-    lazy_chunks = []
-    for file in matching_files:
-        file_path = f"gs://{file}"
-        lf = pl.scan_parquet(file_path).select(select_columns)
-        lazy_chunks.append(lf)
-
-    combined_lf = pl.concat(lazy_chunks)
+    return f"""
+    {base_cte},
+    grouped_data AS (
+      SELECT
+        current_status,
+        tax_id,
+        symbionts_status,
+        common_name,
+        biosample_id,
+        organism
+      FROM base_data
+      GROUP BY biosample_id, current_status, tax_id, symbionts_status, common_name, organism
+    ),
+    deduplicated_data AS (
+      SELECT DISTINCT
+        organism,
+        common_name,
+        current_status,
+        symbionts_status
+      FROM grouped_data
+    )"""
 
 
-    raw_data_lf = (
-        combined_lf
-        # organisms
-        .explode("organisms")
-        .with_columns([
-            pl.col("organisms").struct.field("biosample_id").alias("organisms.biosample_id"),
-            pl.col("organisms").struct.field("organism").alias("organisms.organism"),
-            pl.col("organisms").struct.field("sex").alias("organisms.sex"),
-            pl.col("organisms").struct.field("lifestage").alias("organisms.lifestage"),
-            pl.col("organisms").struct.field("habitat").alias("organisms.habitat"),
-        ])
+def build_table_data_query(tab: str, project_name: str, filters: dict, offset: int = 0, limit: int = 10) -> str:
+    cte = build_table_queries_cte(project_name, filters, tab)
 
-        # raw_data
-        .explode("raw_data")
-        .with_columns([
-            pl.col("raw_data").struct.field("instrument_platform").alias("raw_data.instrument_platform"),
-            pl.col("raw_data").struct.field("instrument_model").alias("raw_data.instrument_model"),
-            pl.col("raw_data").struct.field("library_construction_protocol").alias(
-                "raw_data.library_construction_protocol"),
-            pl.col("raw_data").struct.field("first_public").alias("raw_data.first_public"),
-        ])
+    query = f"""
+    {cte}
+    SELECT *
+    FROM deduplicated_data
+    ORDER BY current_status
+    LIMIT {limit}
+    OFFSET {offset}
+    """
 
-        .with_columns([
-            pl.col("organisms.sex").cast(pl.Utf8).alias("sex"),
-            pl.col("organisms.lifestage").cast(pl.Utf8).alias("lifestage"),
-            pl.col("organisms.habitat").cast(pl.Utf8).alias("habitat"),
-            pl.col("raw_data.instrument_platform").cast(pl.Utf8).alias("instrument_platform"),
-            pl.col("raw_data.instrument_model").cast(pl.Utf8).alias("instrument_model"),
-            pl.col("raw_data.library_construction_protocol").cast(pl.Utf8).alias("library_construction_protocol"),
-            pl.col("raw_data.first_public")
-            .str.strptime(pl.Date, format="%Y-%m-%d", strict=False, exact=True)
-            .cast(pl.Datetime)
-            .alias("first_public"),
-        ])
+    return query
 
-        # organism link
-        .with_columns(
-            pl.when(pl.col("organisms.organism").is_not_null())
-            .then(pl.format(
-                "[{}]({}{})",
-                pl.col("organisms.organism"),
-                pl.lit(link_prefix),
-                pl.col(url_param).map_elements(quote_organism, return_dtype=pl.Utf8)
-            ))
-            .otherwise(pl.lit(""))
-            .alias("organism_link")
-        )
+
+def build_table_count_query(tab: str, project_name: str, filters: dict) -> str:
+    cte = build_table_queries_cte(project_name, filters, tab)
+
+    query = f"""
+    {cte}
+    SELECT COUNT(*) as total_count
+    FROM deduplicated_data
+    """
+
+    return query
+
+
+# metadata
+def build_metadata_pre_aggregated_query(tab: str, project_name: str) -> str:
+    base_cte = build_base_data_cte(project_name, {}, tab)
+
+    query = f"""
+    {base_cte},
+
+    -- pre-aggregate data for pie charts
+    sex_aggregates AS (
+      SELECT
+        sex,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count,
+        -- Store ALL data for each group (no limits)
+        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
+        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
+        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
+      FROM base_data
+      WHERE sex IS NOT NULL
+      GROUP BY sex
+    ),
+
+    lifestage_aggregates AS (
+      SELECT
+        lifestage,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count,
+        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
+        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
+        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
+      FROM base_data
+      WHERE lifestage IS NOT NULL
+      GROUP BY lifestage
+    ),
+
+    habitat_aggregates AS (
+      SELECT
+        habitat,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count,
+        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
+        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
+        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
+      FROM base_data
+      WHERE habitat IS NOT NULL
+      GROUP BY habitat
+    ),
+
+    -- pre-aggregate cross-filtered data for each combination
+    cross_filter_data AS (
+      SELECT
+        sex,
+        lifestage,
+        habitat,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count
+      FROM base_data
+      GROUP BY sex, lifestage, habitat
     )
 
-    raw_data = raw_data_lf.collect()
+    -- return all aggregates in a single result set using UNION ALL
+    SELECT 'sex' as dimension, sex as value, record_count, biosample_count,
+           sample_biosample_ids, sample_organisms, sample_statuses,
+           CAST(NULL AS STRING) as filter_sex, CAST(NULL AS STRING) as filter_lifestage, CAST(NULL AS STRING) as filter_habitat
+    FROM sex_aggregates
 
-    DATASETS[project_name] = {"raw_data": raw_data}
+    UNION ALL
 
-    return DATASETS[project_name]
+    SELECT 'lifestage' as dimension, lifestage as value, record_count, biosample_count,
+           sample_biosample_ids, sample_organisms, sample_statuses,
+           CAST(NULL AS STRING) as filter_sex, CAST(NULL AS STRING) as filter_lifestage, CAST(NULL AS STRING) as filter_habitat
+    FROM lifestage_aggregates
+
+    UNION ALL
+
+    SELECT 'habitat' as dimension, habitat as value, record_count, biosample_count,
+           sample_biosample_ids, sample_organisms, sample_statuses,
+           CAST(NULL AS STRING) as filter_sex, CAST(NULL AS STRING) as filter_lifestage, CAST(NULL AS STRING) as filter_habitat
+    FROM habitat_aggregates
+
+    UNION ALL
+
+    SELECT 'cross_filter' as dimension,
+           CONCAT(IFNULL(sex, 'NULL'), '|', IFNULL(lifestage, 'NULL'), '|', IFNULL(habitat, 'NULL')) as value,
+           record_count, biosample_count,
+           CAST(NULL AS STRING) as sample_biosample_ids,
+           CAST(NULL AS STRING) as sample_organisms,
+           CAST(NULL AS STRING) as sample_statuses,
+           sex as filter_sex, lifestage as filter_lifestage, habitat as filter_habitat
+    FROM cross_filter_data
+
+    ORDER BY dimension, record_count DESC
+    """
+
+    return query
+
+# load pre-aggregated data for charts
+def load_metadata_aggregated_data(project_name: str) -> dict:
+
+    if project_name in METADATA_AGGREGATED_DATA:
+        return METADATA_AGGREGATED_DATA[project_name]
+
+    print(f"Loading aggregated data for {project_name}...")
+    query = build_metadata_pre_aggregated_query('metadata', project_name)
+
+    job_config = bigquery.QueryJobConfig(
+        use_query_cache=True,
+        use_legacy_sql=False,
+        maximum_bytes_billed=10 ** 12
+    )
+
+    query_job = client.query(query, job_config=job_config)
+    df_pandas = query_job.to_dataframe(create_bqstorage_client=True)
+    df_polars = pl.from_pandas(df_pandas)
+
+    aggregated = {
+        'sex': df_polars.filter(pl.col('dimension') == 'sex'),
+        'lifestage': df_polars.filter(pl.col('dimension') == 'lifestage'),
+        'habitat': df_polars.filter(pl.col('dimension') == 'habitat'),
+        'cross_filter': df_polars.filter(pl.col('dimension') == 'cross_filter')
+    }
+
+    METADATA_AGGREGATED_DATA[project_name] = aggregated
+    print(f"Aggregated data loaded for {project_name}")
+    return aggregated
 
 
-@lru_cache(maxsize=10)
-def load_data_cached(project_name):
-    return load_data(project_name)
+# get chart data with cross-filtering applied using pre-aggregated data
+def get_metadata_filtered_chart_data(project_name: str, dimension: str, filters: dict) -> pl.DataFrame:
+
+    aggregated = METADATA_AGGREGATED_DATA[project_name]
+    cross_filter_data = aggregated['cross_filter']
+
+    # apply filters to cross-filter data
+    filtered_data = cross_filter_data
+    for key, value in filters.items():
+        if key != dimension and value and value != "NULL":
+            filter_col = f"filter_{key}"
+            filtered_data = filtered_data.filter(pl.col(filter_col) == value)
+
+    # aggregate by selected slice
+    if dimension == "sex":
+        result = filtered_data.group_by("filter_sex").agg([
+            pl.col("record_count").sum().alias("record_count"),
+            pl.col("biosample_count").sum().alias("biosample_count")
+        ]).rename({"filter_sex": "value"}).filter(pl.col("value").is_not_null())
+    elif dimension == "lifestage":
+        result = filtered_data.group_by("filter_lifestage").agg([
+            pl.col("record_count").sum().alias("record_count"),
+            pl.col("biosample_count").sum().alias("biosample_count")
+        ]).rename({"filter_lifestage": "value"}).filter(pl.col("value").is_not_null())
+    elif dimension == "habitat":
+        result = filtered_data.group_by("filter_habitat").agg([
+            pl.col("record_count").sum().alias("record_count"),
+            pl.col("biosample_count").sum().alias("biosample_count")
+        ]).rename({"filter_habitat": "value"}).filter(pl.col("value").is_not_null())
+
+    return result.sort("record_count", descending=True)
+
+
+# raw_data
+def build_rawdata_pre_aggregated_query(tab: str, project_name: str) -> str:
+
+    base_cte = build_base_data_cte(project_name, {}, tab)
+
+    query = f"""
+    {base_cte},
+
+    -- Pre-aggregate data for pie charts
+    instrument_platform_aggregates AS (
+      SELECT
+        instrument_platform,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count,
+        -- Store ALL data for each group (no limits)
+        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
+        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
+        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
+      FROM base_data
+      WHERE instrument_platform IS NOT NULL
+      GROUP BY instrument_platform
+    ),
+
+    instrument_model_aggregates AS (
+      SELECT
+        instrument_model,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count,
+        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
+        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
+        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
+      FROM base_data
+      WHERE instrument_model IS NOT NULL
+      GROUP BY instrument_model
+    ),
+
+    library_protocol_aggregates AS (
+      SELECT
+        library_construction_protocol,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count,
+        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
+        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
+        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
+      FROM base_data
+      WHERE library_construction_protocol IS NOT NULL
+      GROUP BY library_construction_protocol
+    ),
+
+    -- Time series data (by date)
+    time_series_aggregates AS (
+      SELECT
+        first_public,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count,
+        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
+        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
+        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
+      FROM base_data
+      WHERE first_public IS NOT NULL
+      GROUP BY first_public
+    ),
+
+    -- Pre-aggregate cross-filtered data for each combination
+    cross_filter_data AS (
+      SELECT
+        instrument_platform,
+        instrument_model,
+        library_construction_protocol,
+        first_public,
+        COUNT(DISTINCT organism) as record_count,
+        COUNT(DISTINCT biosample_id) as biosample_count
+      FROM base_data
+      GROUP BY instrument_platform, instrument_model, library_construction_protocol, first_public
+    )
+
+    -- Return all aggregates in a single result set using UNION ALL
+    SELECT 'instrument_platform' as dimension, instrument_platform as value, record_count, biosample_count,
+           sample_biosample_ids, sample_organisms, sample_statuses,
+           CAST(NULL AS STRING) as filter_platform, CAST(NULL AS STRING) as filter_model,
+           CAST(NULL AS STRING) as filter_protocol, CAST(NULL AS DATE) as filter_date
+    FROM instrument_platform_aggregates
+
+    UNION ALL
+
+    SELECT 'instrument_model' as dimension, instrument_model as value, record_count, biosample_count,
+           sample_biosample_ids, sample_organisms, sample_statuses,
+           CAST(NULL AS STRING) as filter_platform, CAST(NULL AS STRING) as filter_model,
+           CAST(NULL AS STRING) as filter_protocol, CAST(NULL AS DATE) as filter_date
+    FROM instrument_model_aggregates
+
+    UNION ALL
+
+    SELECT 'library_construction_protocol' as dimension, library_construction_protocol as value, record_count, biosample_count,
+           sample_biosample_ids, sample_organisms, sample_statuses,
+           CAST(NULL AS STRING) as filter_platform, CAST(NULL AS STRING) as filter_model,
+           CAST(NULL AS STRING) as filter_protocol, CAST(NULL AS DATE) as filter_date
+    FROM library_protocol_aggregates
+
+    UNION ALL
+
+    SELECT 'time_series' as dimension, CAST(first_public AS STRING) as value, record_count, biosample_count,
+           sample_biosample_ids, sample_organisms, sample_statuses,
+           CAST(NULL AS STRING) as filter_platform, CAST(NULL AS STRING) as filter_model,
+           CAST(NULL AS STRING) as filter_protocol, CAST(NULL AS DATE) as filter_date
+    FROM time_series_aggregates
+
+    UNION ALL
+
+    SELECT 'cross_filter' as dimension,
+           CONCAT(
+             IFNULL(instrument_platform, 'NULL'), '|',
+             IFNULL(instrument_model, 'NULL'), '|',
+             IFNULL(library_construction_protocol, 'NULL'), '|',
+             IFNULL(CAST(first_public AS STRING), 'NULL')
+           ) as value,
+           record_count, biosample_count,
+           CAST(NULL AS STRING) as sample_biosample_ids,
+           CAST(NULL AS STRING) as sample_organisms,
+           CAST(NULL AS STRING) as sample_statuses,
+           instrument_platform as filter_platform,
+           instrument_model as filter_model,
+           library_construction_protocol as filter_protocol,
+           first_public as filter_date
+    FROM cross_filter_data
+
+    ORDER BY dimension, record_count DESC
+    """
+
+    return query
+
+
+def load_rawdata_aggregated_data(project_name: str) -> dict:
+
+    if project_name in RAWDATA_AGGREGATED_DATA:
+        return RAWDATA_AGGREGATED_DATA[project_name]
+
+    print(f"Loading raw data aggregated data for {project_name}...")
+    query = build_rawdata_pre_aggregated_query('rawdata', project_name)
+
+    job_config = bigquery.QueryJobConfig(
+        use_query_cache=True,
+        use_legacy_sql=False,
+        maximum_bytes_billed=10 ** 12
+    )
+
+    query_job = client.query(query, job_config=job_config)
+    df_pandas = query_job.to_dataframe(create_bqstorage_client=True)
+    df_polars = pl.from_pandas(df_pandas)
+
+    # Organize data by dimension
+    aggregated = {
+        'instrument_platform': df_polars.filter(pl.col('dimension') == 'instrument_platform'),
+        'instrument_model': df_polars.filter(pl.col('dimension') == 'instrument_model'),
+        'library_construction_protocol': df_polars.filter(pl.col('dimension') == 'library_construction_protocol'),
+        'time_series': df_polars.filter(pl.col('dimension') == 'time_series'),
+        'cross_filter': df_polars.filter(pl.col('dimension') == 'cross_filter')
+    }
+
+    RAWDATA_AGGREGATED_DATA[project_name] = aggregated
+    print(f"Raw data aggregated data loaded for {project_name}")
+    return aggregated
+
+
+# get chart data with cross-filtering applied using pre-aggregated data
+def get_filtered_rawdata_chart_data(project_name: str, dimension: str, filters: dict) -> pl.DataFrame:
+    aggregated = RAWDATA_AGGREGATED_DATA[project_name]
+    cross_filter_data = aggregated['cross_filter']
+
+    # apply filters to cross-filter data
+    filtered_data = cross_filter_data
+    for key, value in filters.items():
+        if key != dimension and value and value != "NULL":
+            if key == "instrument_platform":
+                filtered_data = filtered_data.filter(pl.col("filter_platform") == value)
+            elif key == "instrument_model":
+                filtered_data = filtered_data.filter(pl.col("filter_model") == value)
+            elif key == "library_construction_protocol":
+                filtered_data = filtered_data.filter(pl.col("filter_protocol") == value)
+            elif key == "date_filter":
+                # Handle date filtering for cross-filter
+                date_info = value
+                if isinstance(date_info, str):
+                    date_parsed = pl.lit(date_info).str.to_date()
+                    filtered_data = filtered_data.filter(pl.col("filter_date") == date_parsed)
+                elif isinstance(date_info, dict):
+                    start_date = date_info.get("start")
+                    end_date = date_info.get("end")
+                    if start_date:
+                        start_parsed = pl.lit(start_date).str.to_date()
+                        filtered_data = filtered_data.filter(pl.col("filter_date") >= start_parsed)
+                    if end_date:
+                        end_parsed = pl.lit(end_date).str.to_date()
+                        filtered_data = filtered_data.filter(pl.col("filter_date") <= end_parsed)
+
+    # Aggregate by the target dimension
+    if dimension == "instrument_platform":
+        result = filtered_data.group_by("filter_platform").agg([
+            pl.col("record_count").sum().alias("record_count"),
+            pl.col("biosample_count").sum().alias("biosample_count")
+        ]).rename({"filter_platform": "value"}).filter(pl.col("value").is_not_null())
+    elif dimension == "instrument_model":
+        result = filtered_data.group_by("filter_model").agg([
+            pl.col("record_count").sum().alias("record_count"),
+            pl.col("biosample_count").sum().alias("biosample_count")
+        ]).rename({"filter_model": "value"}).filter(pl.col("value").is_not_null())
+    elif dimension == "library_construction_protocol":
+        result = filtered_data.group_by("filter_protocol").agg([
+            pl.col("record_count").sum().alias("record_count"),
+            pl.col("biosample_count").sum().alias("biosample_count")
+        ]).rename({"filter_protocol": "value"}).filter(pl.col("value").is_not_null())
+    elif dimension == "time_series":
+        result = filtered_data.group_by("filter_date").agg([
+            pl.col("record_count").sum().alias("record_count"),
+            pl.col("biosample_count").sum().alias("biosample_count")
+        ]).rename({"filter_date": "value"}).filter(pl.col("value").is_not_null())
+
+    return result.sort("record_count", descending=True)
+
+
+def fill_missing_dates_polars(time_series_df: pl.DataFrame) -> pl.DataFrame:
+    if len(time_series_df) == 0:
+        # return empty dataframe with correct schema
+        return pl.DataFrame({
+            'Date': [datetime(2020, 1, 1), datetime(2020, 1, 2)],
+            'Organism Count': [0, 0],
+            'BioSample IDs Count': [0, 0]
+        })
+
+    # get date range
+    min_date = time_series_df['Date'].min()
+    max_date = time_series_df['Date'].max()
+
+    # create date range in polars
+    date_range = pl.date_range(
+        min_date,
+        max_date,
+        interval="1d",
+        eager=True
+    )
+
+    full_dates_df = pl.DataFrame({'Date': date_range})
+
+    # join and fill missing values
+    result = full_dates_df.join(
+        time_series_df,
+        on='Date',
+        how='left'
+    ).fill_null(0)
+
+    return result
+
+
+def create_time_series_colors_polars(time_series_df: pl.DataFrame, stored_date) -> pl.DataFrame:
+    highlight_color = 'rgb(255, 99, 71)'
+    default_color = 'rgb(0, 102, 255)'
+
+    if stored_date is None:
+        return time_series_df.with_columns(pl.lit(default_color).alias('bar_color'))
+
+    if isinstance(stored_date, str):
+        # single date selection
+        stored_date_pl = pl.lit(stored_date).str.to_date()
+        return time_series_df.with_columns(
+            pl.when(pl.col('Date') == stored_date_pl)
+            .then(pl.lit(highlight_color))
+            .otherwise(pl.lit(default_color))
+            .alias('bar_color')
+        )
+    elif isinstance(stored_date, dict):
+        # date range selection
+        start_date = stored_date.get("start")
+        end_date = stored_date.get("end")
+
+        condition = pl.lit(True)
+
+        if start_date:
+            start_date_pl = pl.lit(start_date).str.to_date()
+            condition = condition & (pl.col('Date') >= start_date_pl)
+
+        if end_date:
+            end_date_pl = pl.lit(end_date).str.to_date()
+            condition = condition & (pl.col('Date') <= end_date_pl)
+
+        return time_series_df.with_columns(
+            pl.when(condition)
+            .then(pl.lit(highlight_color))
+            .otherwise(pl.lit(default_color))
+            .alias('bar_color')
+        )
+
+    return time_series_df.with_columns(pl.lit(default_color).alias('bar_color'))
+
+
+# generic functions
+def limit_grouped_data_optimized(df: pl.DataFrame, col: str, top_n: int = 10) -> pl.DataFrame:
+    if len(df) <= top_n:
+        return df
+
+    top_rows = df.head(top_n)
+    other_rows = df.slice(top_n, len(df) - top_n)
+
+    # "Others"
+    others_count = other_rows["record_count"].sum()
+    others_biosample_count = other_rows["biosample_count"].sum()
+
+    others_row = pl.DataFrame({
+        "value": ["Others"],
+        "record_count": [others_count],
+        "biosample_count": [others_biosample_count]
+    })
+
+    return pl.concat([top_rows, others_row], how="vertical")
 
 
 def wrap_text_for_display(text, max_chars_per_line=15):
@@ -342,55 +672,73 @@ def wrap_text_for_display(text, max_chars_per_line=15):
     return "<br>".join(lines)
 
 
-def build_pie(df: pl.DataFrame, col_name: str, selected_val: str, type='piechart'):
+def build_pie_optimized(df: pl.DataFrame, col_name: str, selected_val: str, type='piechart'):
     disabled_color = '#cccccc'
     palette = px.colors.qualitative.Plotly
     hole = 0.3 if type == 'doughnut_chart' else 0
     piechart_title = col_name.replace("_", " ").title()
 
-    df_cleaned = df.drop_nulls(subset=["Record Count", col_name])
-
-    # add legend display column for wrapped text using map_elements
-    df_cleaned = df_cleaned.with_columns(
-        pl.col(col_name).map_elements(wrap_text_for_display, return_dtype=pl.Utf8).alias(col_name + '_display')
+    # display column for wrapped text
+    df_display = df.with_columns(
+        pl.col("value").map_elements(wrap_text_for_display, return_dtype=pl.Utf8).alias("value_display")
     )
 
-    # convert to pandas dataframe for plotly operations
-    df_pandas = df_cleaned.to_pandas()
+    # pie labels
+    total = df_display["record_count"].sum()
+    if total > 0:
+        df_display = df_display.with_columns([
+            (pl.col("record_count") / total * 100).alias("percentage")
+        ])
+        df_display = df_display.with_columns([
+            pl.when(pl.col("percentage") > 5)
+            .then(pl.col("percentage").map_elements(lambda x: f"{x:.1f}%", return_dtype=pl.Utf8))
+            .otherwise(pl.lit(""))
+            .alias("text")
+        ])
+    else:
+        df_display = df_display.with_columns([
+            pl.lit(0.0).alias("percentage"),
+            pl.lit("").alias("text")
+        ])
+
+    df_pandas = df_display.to_pandas()
 
     pie = px.pie(
         data_frame=df_pandas,
-        names=col_name + '_display',  # Use wrapped text for display
-        values="Record Count",
+        names="value_display",
+        values="record_count",
         title=piechart_title,
         hole=hole,
-        hover_data={"BioSample IDs Count": True, col_name: False}
+        hover_data={"biosample_count": True, "value": False}
     )
 
+    # ordered lists for custom data, colors, and pulls to match the pie chart order
     ordered_display_names = list(pie.data[0]['labels'])
 
-    # create a lookup from display name to original value and biosample count
-    lookup_df = df_cleaned.select(
-        pl.col(col_name + '_display'),
-        pl.col(col_name).alias("original_value"),
-        pl.col("BioSample IDs Count").alias("biosample_count")
+    # lookup from display name to original value and percentage
+    lookup_df = df_display.select(
+        pl.col("value_display"),
+        pl.col("value").alias("original_value"),
+        pl.col("biosample_count").alias("biosample_count"),
+        pl.col("percentage").alias("percentage")  # Add percentage to lookup
     ).to_dicts()
 
-    lookup_map = {item[col_name + '_display']: (item["biosample_count"], item["original_value"]) for item in lookup_df}
+    lookup_map = {item["value_display"]: (item["biosample_count"], item["original_value"], item["percentage"]) for item
+                  in lookup_df}
 
     reordered_custom_data = []
     reordered_colors = []
     reordered_pulls = []
 
     for i, display_name in enumerate(ordered_display_names):
-        original_bs_count, original_val = lookup_map.get(display_name, (None, None))
+        original_bs_count, original_val, percentage = lookup_map.get(display_name, (None, None, 0))
         if original_val is not None:
-            reordered_custom_data.append([original_bs_count, original_val])
+            reordered_custom_data.append([original_bs_count, original_val, percentage])  # Include percentage
             reordered_colors.append(
-                disabled_color if original_val == "Others" else palette[i % len(palette)])  # <--- Use 'i'
+                disabled_color if original_val == "Others" else palette[i % len(palette)])
             reordered_pulls.append(0.1 if original_val == selected_val else 0)
         else:
-            reordered_custom_data.append([None, None])
+            reordered_custom_data.append([None, None, 0])
             reordered_colors.append(disabled_color)
             reordered_pulls.append(0)
 
@@ -402,7 +750,7 @@ def build_pie(df: pl.DataFrame, col_name: str, selected_val: str, type='piechart
         text=df_pandas["text"],
         textinfo="text",
         textposition="inside",
-        hovertemplate="<b>%{customdata[0][1]}</b><br>Record Count: %{value}<br>BioSample IDs Count: %{customdata[0][0]}<extra></extra>"
+        hovertemplate="<b>%{customdata[0][1]}</b><br>Percentage: %{customdata[0][2]:.1f}%<extra></extra>"
     )
 
     pie.update_layout(
@@ -419,7 +767,7 @@ def build_pie(df: pl.DataFrame, col_name: str, selected_val: str, type='piechart
         margin=dict(l=20, r=180, t=50, b=20),
         title={
             'text': piechart_title,
-            'x': 0.5,  # Center the title
+            'x': 0.5,
             'xanchor': 'center'
         }
     )
@@ -427,32 +775,53 @@ def build_pie(df: pl.DataFrame, col_name: str, selected_val: str, type='piechart
     return pie
 
 
-def generate_pie_labels(df: pl.DataFrame) -> pl.DataFrame:
-    total = df["Record Count"].sum()
-    if total > 0:
-        df = df.with_columns([
-            (pl.col("Record Count") / total * 100).alias("Percentage")
-        ])
-        df = df.with_columns([
-            pl.when(pl.col("Percentage") > 5)
-            .then(
-                pl.col("Percentage").map_elements(lambda x: f"{x:.1f}%", return_dtype=pl.Utf8)
-            )
-            .otherwise(pl.lit(""))
-            .alias("text")
-        ])
-    else:
-        df = df.with_columns([
-            pl.lit(0.0).alias("Percentage"),
-            pl.lit("").alias("text")
-        ])
-    return df
+def load_table_data(project_name: str, filters: dict, page_current: int, page_size: int, tab: str):
+    offset = page_current * page_size
+
+    # get table data
+    if tab == "metadata":
+        data_query = build_table_data_query('metadata', project_name, filters, offset, page_size)
+        count_query = build_table_count_query('metadata', project_name, filters)
+    elif tab == "rawdata":
+        data_query = build_table_data_query('rawdata', project_name, filters, offset, page_size)
+        count_query = build_table_count_query('rawdata', project_name, filters)
+
+    data_job = client.query(data_query)
+    data_df = data_job.to_dataframe()
+
+    # pagination
+    count_job = client.query(count_query)
+    count_result = count_job.to_dataframe()
+    total_count = count_result['total_count'].iloc[0] if not count_result.empty else 0
+
+    # organism links
+    if not data_df.empty:
+        link_prefix = PORTAL_URL_PREFIX.get(project_name, "")
+        url_param = "tax_id" if project_name in ["erga", "gbdp"] else "organism"
+
+        def create_organism_link(row):
+            organism = row.get('organism', '')
+            if not organism:
+                return ''
+
+            if url_param == 'tax_id':
+                url_value = str(row.get('tax_id', ''))
+            else:
+                url_value = urllib.parse.quote(organism, safe='')
+
+            return f'[{organism}]({link_prefix}{url_value})'
+
+        data_df['organism_link'] = data_df.apply(create_organism_link, axis=1)
+
+    return data_df, total_count
 
 
 def layout(**kwargs):
     project_name = kwargs.get("projectName", "dtol")
 
-    load_data(project_name)
+    # load aggregated data
+    load_metadata_aggregated_data(project_name)
+    load_rawdata_aggregated_data(project_name)
 
     header_colour = "#f1f3f4"
     if project_name == "dtol":
@@ -467,10 +836,14 @@ def layout(**kwargs):
     tab1_content = html.Div([
         dcc.Store(id="stored-selection", data={"sex": None, "lifestage": None, "habitat": None}),
         dcc.Store(id="project-store", data=project_name),
-        html.Div(id="metadata-filter-selection",
-                 style={"marginBottom": "30px", "marginTop": "40px", "textAlign": "center",
-                        "fontWeight": "bold", "color": "#394959"}),
 
+        # filter selection text
+        html.Div(
+            id="metadata-filter-selection",
+            className="my-4 text-center fw-bold text-dark"
+        ),
+
+        # charts row
         dbc.Row([
             dbc.Col(
                 dcc.Loading(
@@ -499,42 +872,62 @@ def layout(**kwargs):
                 ),
                 width=4
             ),
-        ], style={"marginBottom": "40px"}),
+        ], className="mb-4"),
 
+        # Reset button
         html.Div(
-            dbc.Button("Reset All", id="reset-all-dashboards", color="danger", className="mb-3"),
-            style={"display": "flex", "justifyContent": "flex-end"}
+            dbc.Button(
+                "Reset All",
+                id="reset-all-dashboards",
+                color="danger",
+                className="mb-3"
+            ),
+            className="d-flex justify-content-end"
         ),
 
-        dbc.Row(dbc.Col(
-            dcc.Loading(
-                id="loading-dashboard-datatable",
-                type="circle",
-                color="#0d6efd",
-                children=dash_table.DataTable(
-                    id="dashboard-datatable-paging",
-                    columns=[
-                        {"name": "Scientific Name", "id": "organism_link", "presentation": "markdown"},
-                        {"name": "Common Name", "id": "common_name"},
-                        {"name": "Current Status", "id": "current_status"},
-                        {"name": "Symbionts Status", "id": "symbionts_status"}
-                    ],
-                    style_cell={"textAlign": "center"},
-                    style_header={
-                        "backgroundColor": header_colour,
-                        "color": "#141414",
-
-                    },
-                    css=[dict(selector="p", rule="margin: 0; text-align: center"),
-                         dict(selector="a", rule="text-decoration: none")],
-                    page_current=0,
-                    page_size=10,
-                    page_action="custom",
-                    style_table={'overflowX': 'scroll'}
+        # table section
+        dbc.Row([
+            dbc.Col([
+                # organism count header
+                dcc.Loading(
+                    id="loading-organism-count",
+                    type="circle",
+                    color="#0d6efd",
+                    children=html.Div(
+                        id="organism-count-header",
+                        className="text-center mb-2 fs-6 fw-bold text-dark"
+                    )
+                ),
+                # data table
+                dcc.Loading(
+                    id="loading-dashboard-datatable",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dash_table.DataTable(
+                        id="dashboard-datatable-paging",
+                        columns=[
+                            {"name": "Scientific Name", "id": "organism_link", "presentation": "markdown"},
+                            {"name": "Common Name", "id": "common_name"},
+                            {"name": "Current Status", "id": "current_status"},
+                            {"name": "Symbionts Status", "id": "symbionts_status"}
+                        ],
+                        style_cell={"textAlign": "center"},
+                        style_header={
+                            "backgroundColor": header_colour,
+                            "color": "#141414",
+                        },
+                        css=[
+                            dict(selector="p", rule="margin: 0; text-align: center"),
+                            dict(selector="a", rule="text-decoration: none")
+                        ],
+                        page_current=0,
+                        page_size=10,
+                        page_action="custom",
+                        style_table={'overflowX': 'auto'}
+                    )
                 )
-            ), md=12, id="col-table"),
-            style={"marginTop": "20px", "marginBottom": "20px"}
-        )
+            ], md=12, id="col-table")
+        ], className="my-3")
     ])
 
     tab2_content = html.Div([
@@ -543,11 +936,13 @@ def layout(**kwargs):
         dcc.Store(id="rawdata-selected-date", data=None),
         dcc.Store(id="tab2-project-store", data=project_name),
 
+        # filter selection text
+        html.Div(
+            id="rawdata-filter-selection",
+            className="my-4 text-center fw-bold text-dark"
+        ),
 
-        html.Div(id="rawdata-filter-selection",
-                 style={"marginBottom": "30px", "marginTop": "40px", "textAlign": "center",
-                        "fontWeight": "bold", "color": "#394959"}),
-
+        # charts row
         dbc.Row([
             dbc.Col(
                 dcc.Loading(
@@ -576,11 +971,11 @@ def layout(**kwargs):
                 ),
                 width=4
             ),
-        ], style={"marginBottom": "40px"}),
+        ], className="mb-4"),
 
         # date range picker
         dbc.Row([
-            dbc.Col(width=8),  # spacer
+            dbc.Col(width=8),
             dbc.Col(
                 dcc.DatePickerRange(
                     id='date-range-picker',
@@ -590,10 +985,11 @@ def layout(**kwargs):
                     style={"display": "inline-block"}
                 ),
                 width=4,
-                style={"textAlign": "right", "marginBottom": "20px"}
+                className="text-end mb-3"
             ),
         ]),
 
+        # time series chart
         dbc.Row([
             dbc.Col(
                 dcc.Loading(
@@ -604,57 +1000,94 @@ def layout(**kwargs):
                 ),
                 width=12
             )
-        ], style={"marginBottom": "20px"}),
+        ], className="mb-3"),
 
+        # Reset button
         html.Div(
-            dbc.Button("Reset All", id="tab2-reset-all-dashboards", color="danger", className="mb-3"),
-            style={"display": "flex", "justifyContent": "flex-end"}
+            dbc.Button(
+                "Reset All",
+                id="tab2-reset-all-dashboards",
+                color="danger",
+                className="mb-3"
+            ),
+            className="d-flex justify-content-end"
         ),
 
-        dbc.Row(dbc.Col(
-            dcc.Loading(
-                id="tab2-loading-dashboard-datatable",
-                type="circle",
-                color="#0d6efd",
-                children=dash_table.DataTable(
-                    id="tab2-dashboard-datatable-paging",
-                    columns=[
-                        {"name": "Scientific Name", "id": "organism_link", "presentation": "markdown"},
-                        {"name": "Common Name", "id": "common_name"},
-                        {"name": "Current Status", "id": "current_status"},
-                        {"name": "Symbionts Status", "id": "symbionts_status"}
-                    ],
-                    style_cell={"textAlign": "center"},
-                    style_header={
-                        "backgroundColor": header_colour,
-                        "color": "#141414",
-
-                    },
-                    css=[dict(selector="p", rule="margin: 0; text-align: center"),
-                         dict(selector="a", rule="text-decoration: none")],
-                    page_current=0,
-                    page_size=10,
-                    page_action="custom",
-                    style_table={'overflowX': 'scroll'}
+        # table section
+        dbc.Row([
+            dbc.Col([
+                # organism count header
+                dcc.Loading(
+                    id="tab2-loading-organism-count",
+                    type="circle",
+                    color="#0d6efd",
+                    children=html.Div(
+                        id="tab2-organism-count-header",
+                        className="text-center mb-2 fs-6 fw-bold text-dark"
+                    )
+                ),
+                # data table
+                dcc.Loading(
+                    id="tab2-loading-dashboard-datatable",
+                    type="circle",
+                    color="#0d6efd",
+                    children=dash_table.DataTable(
+                        id="tab2-dashboard-datatable-paging",
+                        columns=[
+                            {"name": "Scientific Name", "id": "organism_link", "presentation": "markdown"},
+                            {"name": "Common Name", "id": "common_name"},
+                            {"name": "Current Status", "id": "current_status"},
+                            {"name": "Symbionts Status", "id": "symbionts_status"}
+                        ],
+                        style_cell={"textAlign": "center"},
+                        style_header={
+                            "backgroundColor": header_colour,
+                            "color": "#141414",
+                        },
+                        css=[
+                            dict(selector="p", rule="margin: 0; text-align: center"),
+                            dict(selector="a", rule="text-decoration: none")
+                        ],
+                        page_current=0,
+                        page_size=10,
+                        page_action="custom",
+                        style_table={'overflowX': 'auto'}
+                    )
                 )
-            ), md=12, id="tab2-col-table"),
-            style={"marginTop": "20px", "marginBottom": "20px"}
-        )
+            ], md=12, id="tab2-col-table")
+        ], className="my-3")
     ])
 
     return dbc.Container([
-        dcc.Tabs([
-            dcc.Tab(label='Metadata', children=[tab1_content]),
-            dcc.Tab(label='Raw Data', children=[tab2_content]),
-        ])
+        dcc.Store(id="active-tab-store", data="metadata"),  # ADD THIS LINE
+        dcc.Tabs(
+            id="main-tabs",  # ADD THIS ID
+            value="metadata",  # ADD THIS
+            children=[
+                dcc.Tab(label='Metadata', value="metadata", children=[tab1_content]),  # ADD value
+                dcc.Tab(label='Raw Data', value="rawdata", children=[tab2_content]),   # ADD value
+            ]
+        )
     ], fluid=True)
 
 
 @callback(
-    Output("metadata-filter-selection", "children"),
-    Input("stored-selection", "data")
+    Output("active-tab-store", "data"),
+    Input("main-tabs", "value")
 )
-def update_selection_text(selected):
+def update_active_tab(active_tab):
+    return active_tab
+
+@callback(
+    Output("metadata-filter-selection", "children"),
+    Input("stored-selection", "data"),
+    Input("active-tab-store", "data")
+)
+def update_selection_text(selected, active_tab):
+
+    if active_tab != "metadata":
+        raise PreventUpdate
+
     default_msg = "Please click on the pie charts to filter the data"
     if not selected:
         return default_msg
@@ -666,62 +1099,9 @@ def update_selection_text(selected):
             label = key.capitalize()
             parts.extend([
                 html.Span(f"{label}: "),
-                html.Span(f"{value}", style={"color": "#8fa8c2"}),
+                html.Span(f"{value}", className="text-selection-blue"),
                 html.Span(" | ")
             ])
-
-    return parts[:-1] if parts else default_msg  # remove last " | "
-
-
-@callback(
-    Output("rawdata-filter-selection", "children"),
-    Input("rawdata-stored-selection", "data"),
-    Input("rawdata-selected-date", "data")
-)
-def update_selection_text(selected_piecharts, selected_date):
-    default_msg = "Please click on the charts to filter the data"
-    if not selected_piecharts and not selected_date:
-        return default_msg
-
-    parts = []
-    for key in ["instrument_platform", "instrument_model", "library_construction_protocol"]:
-        value = selected_piecharts.get(key)
-        if value:
-            label = key.replace("_", " ").title()
-            parts.extend([
-                html.Span(f"{label}: "),
-                html.Span(f"{value}", style={"color": "#8fa8c2"}),
-                html.Span(" | ")
-            ])
-
-    if selected_date:
-        if isinstance(selected_date, str): # single date selection
-            parts.extend([
-                html.Span(f"Date: "),
-                html.Span(f"{selected_date}", style={"color": "#8fa8c2"}),
-                html.Span(" | ")
-            ])
-        elif isinstance(selected_date, dict): # date range selection
-            start_date = selected_date.get("start")
-            end_date = selected_date.get("end")
-            if start_date and end_date:
-                parts.extend([
-                    html.Span(f"Date Range: "),
-                    html.Span(f"{start_date} to {end_date}", style={"color": "#8fa8c2"}),
-                    html.Span(" | ")
-                ])
-            elif start_date:
-                parts.extend([
-                    html.Span(f"Start Date: "),
-                    html.Span(f"{start_date}", style={"color": "#8fa8c2"}),
-                    html.Span(" | ")
-                ])
-            elif end_date:
-                parts.extend([
-                    html.Span(f"End Date: "),
-                    html.Span(f"{end_date}", style={"color": "#8fa8c2"}),
-                    html.Span(" | ")
-                ])
 
     return parts[:-1] if parts else default_msg
 
@@ -732,31 +1112,15 @@ def update_selection_text(selected_piecharts, selected_date):
     Input('pie-sex', 'clickData'),
     Input('pie-lifestage', 'clickData'),
     Input('pie-habitat', 'clickData'),
+    Input("active-tab-store", "data"),
     State("dashboard-datatable-paging", "page_current"),
     prevent_initial_call=True
 )
-def reset_metadata_paging(n_clicks, sex_click, lifestage_click, habitat_click, current_page):
-    if current_page != 0:
-        return 0
-    raise dash.exceptions.PreventUpdate
+def reset_metadata_paging(n_clicks, sex_click, lifestage_click, habitat_click, active_tab, current_page):
 
+    if active_tab != "metadata":
+        raise PreventUpdate
 
-@callback(
-    Output("tab2-dashboard-datatable-paging", "page_current", allow_duplicate=True),
-    Input("tab2-reset-all-dashboards", "n_clicks"),
-    Input('pie-instrument-platform', 'clickData'),
-    Input('pie-instrument-model', 'clickData'),
-    Input('pie-library-construction-protocol', 'clickData'),
-    Input('time-series-graph', 'clickData'),
-    Input('date-range-picker', 'start_date'),
-    Input('date-range-picker', 'end_date'),
-    State("tab2-dashboard-datatable-paging", "page_current"),
-    prevent_initial_call=True
-)
-def reset_rawdata_paging(n_clicks, instrument_platform_click, instrument_model_click,
-                         library_construction_protocol_click, time_series_click,
-                         start_date, end_date, current_page):
-    # only reset if the current page is not already 0, to avoid unnecessary updates
     if current_page != 0:
         return 0
     raise dash.exceptions.PreventUpdate
@@ -773,11 +1137,15 @@ def reset_rawdata_paging(n_clicks, instrument_platform_click, instrument_model_c
     Input("project-store", "data"),
     Input("stored-selection", "data"),
     Input("reset-all-dashboards", "n_clicks"),
+    Input("active-tab-store", "data"),
     State("stored-selection", "data")
 )
 def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
                           project_name, selected_pie_input,
-                          reset_n_clicks, stored_selection):
+                          reset_n_clicks, active_tab, stored_selection):
+
+    if active_tab != "metadata":
+        raise PreventUpdate
 
     triggered_id = ctx.triggered_id
 
@@ -790,48 +1158,34 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
 
     if triggered_id == "pie-sex":
         label = extract_label(pie_sex_click)
-        if label != "Others":
+        if label and label != "Others":
             stored_selection["sex"] = label
     elif triggered_id == "pie-lifestage":
         label = extract_label(pie_lifestage_click)
-        if label != "Others":
+        if label and label != "Others":
             stored_selection["lifestage"] = label
     elif triggered_id == "pie-habitat":
         label = extract_label(pie_habitat_click)
-        if label != "Others":
+        if label and label != "Others":
             stored_selection["habitat"] = label
     elif triggered_id == "reset-all-dashboards":
         stored_selection = {"sex": None, "lifestage": None, "habitat": None}
 
-    # convert to lazyframe
-    raw_lf = DATASETS[project_name]["raw_data"].lazy()
-
+    # build charts with pre-aggregated data
     pies = {}
-    for dim in ["sex", "lifestage", "habitat"]:
-        lf_filtered = raw_lf
-        for key, value in stored_selection.items():
-            if key != dim and value:
-                lf_filtered = lf_filtered.filter(pl.col(key) == value)
-
-        lf_grouped = generate_grouped_data(lf_filtered, dim)
-
-        # collect for post-processing
-        df_grouped = lf_grouped.collect()
-        df_filtered = lf_filtered.collect()
-
-        df_limited = limit_grouped_data(df_grouped, dim, df_filtered)
-        df_final   = generate_pie_labels(df_limited)
-        pies[dim] = build_pie(df_final, dim, stored_selection[dim])
+    for dimension in ["sex", "lifestage", "habitat"]:
+        chart_data = get_metadata_filtered_chart_data(project_name, dimension, stored_selection)
+        limited_data = limit_grouped_data_optimized(chart_data, dimension)
+        pies[dimension] = build_pie_optimized(limited_data, dimension, stored_selection[dimension])
 
     return pies["sex"], pies["lifestage"], pies["habitat"], stored_selection
-
 
 
 @callback(
     Output("dashboard-datatable-paging", "data"),
     Output("dashboard-datatable-paging", "page_count"),
     Output("dashboard-datatable-paging", "page_current"),
-
+    Output("organism-count-header", "children"),  # Add this output
     Input('dashboard-datatable-paging', "page_current"),
     Input('dashboard-datatable-paging', "page_size"),
     Input("project-store", "data"),
@@ -840,69 +1194,126 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
     Input("pie-lifestage", "clickData"),
     Input("pie-habitat", "clickData"),
     Input("reset-all-dashboards", "n_clicks"),
+    Input("active-tab-store", "data"),
 )
 def build_metadata_table(page_current: int, page_size: int, project_name: str, stored_selection: dict,
-                        pie_sex_click, pie_lifestage_click, pie_habitat_click, reset_clicks):
-    filtered_df = DATASETS[project_name]["raw_data"].clone()
+                         pie_sex_click, pie_lifestage_click, pie_habitat_click, reset_clicks, active_tab):
+
+    if active_tab != "metadata":
+        raise PreventUpdate
+
+    if page_current is None or page_size is None or not project_name:
+        raise PreventUpdate
+
     stored_selection = stored_selection or {"sex": None, "lifestage": None, "habitat": None}
 
-    # data table filtering
-    for key, value in stored_selection.items():
-        if value:
-            filtered_df = filtered_df.filter(pl.col(key) == value)
-
-    grouped_df = filtered_df.group_by('organisms.biosample_id').agg(
-        pl.col('common_name').first().alias('common_name'),
-        pl.col('current_status').first().alias('current_status'),
-        pl.col('tax_id').first().alias('tax_id'),
-        pl.col('symbionts_status').first().alias('symbionts_status'),
-        pl.col('organisms.organism').first().alias('organisms.organism'),
-    )
-
-    link_prefix =  PORTAL_URL_PREFIX.get(project_name, "")
-
-    if project_name == "erga" or project_name == "gbdp":
-        url_param = "tax_id"
-    else:
-        url_param = "organisms.organism"
-
-    grouped_df = grouped_df.with_columns(
-        pl.when(pl.col("organisms.organism").is_not_null())
-        .then(
-            pl.format(
-                f"[{{}}]({link_prefix}{{}})",
-                pl.col("organisms.organism"),
-                pl.col(url_param)
-                .map_elements(lambda x: urllib.parse.quote(str(x)), return_dtype=pl.Utf8)
-            )
-        )
-        .otherwise(pl.lit(""))
-        .alias("organism_link")
-    )
-
-    grouped_df = grouped_df.unique(subset=[
-        "organism_link",
-        "common_name",
-        "current_status",
-        "symbionts_status"
-    ])
-
-    grouped_df = grouped_df.sort(by="current_status", descending=False)
+    table_data, total_count = load_table_data(project_name, stored_selection, page_current, page_size, "metadata")
 
     # pagination
-    total_rows = len(grouped_df)
-    total_pages = max(math.ceil(total_rows / page_size), 1)
+    total_pages = max(math.ceil(total_count / page_size), 1)
     page_current = min(page_current, total_pages - 1)
 
+    # organism count header
+    filters_applied = any(v for v in stored_selection.values() if v)
+    if filters_applied:
+        filter_text = "matching your selection"
+    else:
+        filter_text = "in total"
+
+    count_header = f"{total_count:,} organisms found {filter_text}"
+
     return (
-        grouped_df.slice(page_current * page_size, page_size).to_dicts(),
+        table_data.to_dict('records'),
         total_pages,
-        page_current
+        page_current,
+        count_header
     )
 
+# ** TAB 2 **#
+@callback(
+    Output("rawdata-filter-selection", "children"),
+    Input("rawdata-stored-selection", "data"),
+    Input("rawdata-selected-date", "data"),
+    Input("active-tab-store", "data")
+)
+def update_rawdata_selection_text(selected_piecharts, selected_date, active_tab):
+
+    if active_tab != "rawdata":
+        raise PreventUpdate
+
+    default_msg = "Please click on the charts to filter the data"
+    if not selected_piecharts and not selected_date:
+        return default_msg
+
+    parts = []
+    for key in ["instrument_platform", "instrument_model", "library_construction_protocol"]:
+        value = selected_piecharts.get(key) if selected_piecharts else None
+        if value:
+            label = key.replace("_", " ").title()
+            parts.extend([
+                html.Span(f"{label}: "),
+                html.Span(f"{value}", className="text-selection-blue"),
+                html.Span(" | ")
+            ])
+
+    if selected_date:
+        if isinstance(selected_date, str):  # single date selection
+            parts.extend([
+                html.Span(f"Date: "),
+                html.Span(f"{selected_date}", className="text-selection-blue"),
+                html.Span(" | ")
+            ])
+        elif isinstance(selected_date, dict):  # date range selection
+            start_date = selected_date.get("start")
+            end_date = selected_date.get("end")
+            if start_date and end_date:
+                parts.extend([
+                    html.Span(f"Date Range: "),
+                    html.Span(f"{start_date} to {end_date}", className="text-selection-blue"),
+                    html.Span(" | ")
+                ])
+            elif start_date:
+                parts.extend([
+                    html.Span(f"Start Date: "),
+                    html.Span(f"{start_date}", className="text-selection-blue"),
+                    html.Span(" | ")
+                ])
+            elif end_date:
+                parts.extend([
+                    html.Span(f"End Date: "),
+                    html.Span(f"{end_date}", className="text-selection-blue"),
+                    html.Span(" | ")
+                ])
+
+    return parts[:-1] if parts else default_msg
 
 
-# **** Tab 2 ***#
+@callback(
+    Output("tab2-dashboard-datatable-paging", "page_current", allow_duplicate=True),
+    Input("tab2-reset-all-dashboards", "n_clicks"),
+    Input('pie-instrument-platform', 'clickData'),
+    Input('pie-instrument-model', 'clickData'),
+    Input('pie-library-construction-protocol', 'clickData'),
+    Input('time-series-graph', 'clickData'),
+    Input('date-range-picker', 'start_date'),
+    Input('date-range-picker', 'end_date'),
+    Input("active-tab-store", "data"),
+    State("tab2-dashboard-datatable-paging", "page_current"),
+    prevent_initial_call=True
+)
+def reset_rawdata_paging(n_clicks, instrument_platform_click, instrument_model_click,
+                         library_construction_protocol_click, time_series_click,
+                         start_date, end_date, active_tab, current_page):
+
+    if active_tab != "rawdata":
+        raise PreventUpdate
+
+    if current_page != 0:
+        return 0
+    raise dash.exceptions.PreventUpdate
+
+
+
 @dash.callback(
     Output('pie-instrument-platform', 'figure'),
     Output('pie-instrument-model', 'figure'),
@@ -923,20 +1334,24 @@ def build_metadata_table(page_current: int, page_size: int, project_name: str, s
     Input("rawdata-stored-selection", "data"),
     Input("rawdata-selected-date", "data"),
     Input("tab2-reset-all-dashboards", "n_clicks"),
+    Input("active-tab-store", "data"),
 
     State('rawdata-stored-selection', 'data'),
     State('rawdata-selected-date', 'data')
 )
 def build_rawdata_charts(instrument_platform_click, instrument_model_click,
                          library_construction_protocol_click, time_series_click,
-                         picker_start_date, picker_end_date, # New arguments
+                         picker_start_date, picker_end_date,
                          project_name, selected_charts_input, selected_date_input,
-                         reset_n_clicks, stored_selection, stored_date):
+                         reset_n_clicks, active_tab, stored_selection, stored_date):
+
+    if active_tab != "rawdata":
+        raise PreventUpdate
+
     triggered_id = ctx.triggered_id
 
     stored_selection = selected_charts_input or {"instrument_platform": None, "instrument_model": None,
                                                  "library_construction_protocol": None}
-
     stored_date = selected_date_input or None
 
     # clear date picker if a single bar is clicked or reset
@@ -948,21 +1363,19 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
             return None
         return click_data['points'][0]['customdata'][1]
 
-
     if triggered_id == "pie-instrument-platform":
         label = extract_label(instrument_platform_click)
-        if label != "Others":
+        if label and label != "Others":
             stored_selection["instrument_platform"] = label
     elif triggered_id == "pie-instrument-model":
         label = extract_label(instrument_model_click)
-        if label != "Others":
+        if label and label != "Others":
             stored_selection["instrument_model"] = label
     elif triggered_id == "pie-library-construction-protocol":
         label = extract_label(library_construction_protocol_click)
-        if label != "Others":
+        if label and label != "Others":
             stored_selection["library_construction_protocol"] = label
     elif triggered_id == "time-series-graph":
-        # if a time series bar is clicked, set stored_date to that single date
         if time_series_click:
             stored_date = time_series_click['points'][0]['x']
         else:
@@ -981,134 +1394,75 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
         clear_picker_start = None
         clear_picker_end = None
 
-    df_raw = DATASETS[project_name]["raw_data"]
-
-    # apply filtering for each pie chart based on selection of the other two and date
-    def filter_df(pie_key):
-        df = df_raw.clone()
-        for key, value in stored_selection.items():
-            if key != pie_key and value:
-                df = df.filter(pl.col(key) == value)
-
-        if stored_date:
-            if isinstance(stored_date, str):
-                stored_date_obj = pl.lit(stored_date).str.to_date()
-                df = df.filter(pl.col('first_public').dt.date() == stored_date_obj)
-            elif isinstance(stored_date, dict):
-                start_date = stored_date.get("start")
-                end_date = stored_date.get("end")
-                if start_date:
-                    start_parsed = pl.lit(start_date).str.to_date()
-                    df = df.filter(pl.col("first_public").dt.date() >= start_parsed)
-                if end_date:
-                    end_parsed = pl.lit(end_date).str.to_date()
-                    df = df.filter(pl.col("first_public").dt.date() <= end_parsed)
-        return df
-
-
-    # filter and update pie datasets
-    for key in ["instrument_platform", "instrument_model", "library_construction_protocol"]:
-        df_sub = filter_df(key)
-        grouped_data = generate_grouped_data(df_sub.lazy(), key).collect()
-        updated_grouped_data = limit_grouped_data(grouped_data, key, df_sub)
-        updated_grouped_data = generate_pie_labels(updated_grouped_data)
-        DATASETS[project_name][key] = {"df_data": df_sub, "grouped_data": updated_grouped_data}
-
-    df_instrument_platform = DATASETS[project_name]["instrument_platform"]["grouped_data"]
-    df_instrument_model = DATASETS[project_name]["instrument_model"]["grouped_data"]
-    df_library_construction_protocol = DATASETS[project_name]["library_construction_protocol"]["grouped_data"]
-
-
-    pie_instrument_platform = build_pie(df_instrument_platform, "instrument_platform",
-                                        stored_selection["instrument_platform"], 'doughnut_chart')
-
-    pie_instrument_model = build_pie(df_instrument_model, "instrument_model",
-                                     stored_selection["instrument_model"], 'doughnut_chart')
-
-    pie_instrument_construction_protocol = build_pie(df_library_construction_protocol,
-                                                     "library_construction_protocol",
-                                                     stored_selection["library_construction_protocol"],
-                                                     'doughnut_chart')
-
-    # time series section
-    df_all_dates = generate_grouped_data(df_raw.lazy(), "first_public").collect()
-    df_all_dates = df_all_dates.with_columns([
-        pl.col('first_public').dt.date().alias('Date'),
-        pl.col('Record Count').alias('Total Organism Count'),
-        pl.col('BioSample IDs Count').alias('Total BioSample IDs Count')
-    ]).select(['Date', 'Total Organism Count', 'Total BioSample IDs Count'])
-
-    df_filtered_ts = df_raw.clone()
-
-    # apply pie selections for the time series
-    for key, value in stored_selection.items():
-        if value:
-            df_filtered_ts = df_filtered_ts.filter(pl.col(key) == value)
-
-    filtered_ts = generate_grouped_data(df_filtered_ts.lazy(), "first_public").collect()
-    filtered_ts = filtered_ts.with_columns([
-        pl.col('first_public').dt.date().alias('Date'),
-        pl.col('Record Count').alias('Organism Count'),
-        pl.col('BioSample IDs Count').alias('BioSample IDs Count')
-    ]).select(['Date', 'Organism Count', 'BioSample IDs Count'])
-
-    df_all_dates_pd = df_all_dates.to_pandas()
-    filtered_ts_pd = filtered_ts.to_pandas()
-
-    grouped_ts = pd.merge(df_all_dates_pd[['Date']], filtered_ts_pd, on='Date', how='left').fillna(0)
-
-    # highlight selected date range
-    highlight_color = 'rgb(255, 99, 71)'
-    default_color = 'rgb(0, 102, 255)'
-
-    grouped_ts['bar_color'] = default_color
-
+    # filters for cross-filtering
+    filters = stored_selection.copy()
     if stored_date:
-        if isinstance(stored_date, str):
-            stored_date_obj = pd.to_datetime(stored_date).date()
-            grouped_ts['bar_color'] = grouped_ts['Date'].dt.date.apply(
-                lambda d: highlight_color if d == stored_date_obj else default_color
-            )
-        elif isinstance(stored_date, dict):  # Date range selected
-            start_date_range = stored_date.get("start")
-            end_date_range = stored_date.get("end")
-            if start_date_range:
-                start_date_range_obj = pd.to_datetime(start_date_range).date()
-            else:
-                start_date_range_obj = None
-            if end_date_range:
-                end_date_range_obj = pd.to_datetime(end_date_range).date()
-            else:
-                end_date_range_obj = None
+        filters["date_filter"] = stored_date
 
-            def get_color_for_date(d):
-                is_in_range = True
-                if start_date_range_obj and d < start_date_range_obj:
-                    is_in_range = False
-                if end_date_range_obj and d > end_date_range_obj:
-                    is_in_range = False
-                return highlight_color if is_in_range else default_color
+    # charts using pre-aggregated data
+    pies = {}
+    for dimension in ["instrument_platform", "instrument_model", "library_construction_protocol"]:
+        chart_data = get_filtered_rawdata_chart_data(project_name, dimension, filters)
+        limited_data = limit_grouped_data_optimized(chart_data, dimension)
+        pies[dimension] = build_pie_optimized(limited_data, dimension, stored_selection[dimension],
+                                                      'doughnut_chart')
 
-            grouped_ts['bar_color'] = grouped_ts['Date'].dt.date.apply(get_color_for_date)
+    # time series chart
+    time_series_data = get_filtered_rawdata_chart_data(project_name, "time_series",
+                                                       {k: v for k, v in filters.items() if k != "date_filter"})
 
+    # process time series data
+    if len(time_series_data) > 0:
+        # check if 'value' is a date type or string
+        if time_series_data.schema['value'] == pl.Date:
+            # if it's already a date, just rename it
+            time_series_df = time_series_data.with_columns([
+                pl.col("value").alias("Date"),
+                pl.col("record_count").alias("Organism Count"),
+                pl.col("biosample_count").alias("BioSample IDs Count")
+            ]).sort("Date")
+        else:
+            # it's a string, parse it
+            time_series_df = time_series_data.with_columns([
+                pl.col("value").str.strptime(pl.Date, format="%Y-%m-%d").alias("Date"),
+                pl.col("record_count").alias("Organism Count"),
+                pl.col("biosample_count").alias("BioSample IDs Count")
+            ]).sort("Date")
+    else:
+        # empty dataframe if no data
+        time_series_df = pl.DataFrame({
+            'Date': [],
+            'Organism Count': [],
+            'BioSample IDs Count': []
+        }, schema={
+            'Date': pl.Date,
+            'Organism Count': pl.Int64,
+            'BioSample IDs Count': pl.Int64
+        })
 
-    # customdata for hovertemplate
-    customdata = grouped_ts[['Organism Count', 'BioSample IDs Count']].values
+    time_series_df = fill_missing_dates_polars(time_series_df)
+
+    time_series_df = create_time_series_colors_polars(time_series_df, stored_date)
+
+    # convert to pandas for plotly graph
+    time_series_pandas = time_series_df.to_pandas()
+
+    # time series chart
+    customdata = time_series_pandas[['Organism Count', 'BioSample IDs Count']].values
 
     time_series_fig = px.bar(
-        grouped_ts,
+        time_series_pandas,
         x='Date',
         y='Organism Count',
         title='Record Count Over Time',
     )
 
     time_series_fig.update_traces(
-        marker_color=grouped_ts['bar_color'],
+        marker_color=time_series_pandas['bar_color'],
         marker_line_width=0,
         customdata=customdata,
         hovertemplate=(
             "<b>Date: %{x|%d %b %Y}</b><br>"
-            "Organism Count: %{customdata[0]}<br>"
             "BioSample IDs Count: %{customdata[1]}<extra></extra>"
         )
     )
@@ -1134,9 +1488,9 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
     )
 
     return (
-        pie_instrument_platform,
-        pie_instrument_model,
-        pie_instrument_construction_protocol,
+        pies["instrument_platform"],
+        pies["instrument_model"],
+        pies["library_construction_protocol"],
         time_series_fig,
         stored_selection,
         stored_date,
@@ -1149,6 +1503,7 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
     Output("tab2-dashboard-datatable-paging", "data"),
     Output("tab2-dashboard-datatable-paging", "page_count"),
     Output("tab2-dashboard-datatable-paging", "page_current"),
+    Output("tab2-organism-count-header", "children"),  # Add this output
 
     Input("tab2-dashboard-datatable-paging", "page_current"),
     Input("tab2-dashboard-datatable-paging", "page_size"),
@@ -1162,80 +1517,41 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
     Input('date-range-picker', 'start_date'),
     Input('date-range-picker', 'end_date'),
     Input("tab2-reset-all-dashboards", "n_clicks"),
+    Input("active-tab-store", "data"),
 )
 def build_rawdata_table(page_current: int, page_size: int, project_name: str,
-                       selected_pie_data: dict, selected_date,
-                       platform_click, model_click, protocol_click, time_click,
-                       start_date, end_date, reset_clicks):
-    filtered_df = DATASETS[project_name]["raw_data"].clone()
+                        selected_pie_data: dict, selected_date,
+                        platform_click, model_click, protocol_click, time_click,
+                        start_date, end_date, reset_clicks, active_tab):
 
-    # apply pie chart filters
-    if selected_pie_data:
-        for category in ["instrument_platform", "instrument_model", "library_construction_protocol"]:
-            selected_value = selected_pie_data.get(category)
-            if selected_value and selected_value != "Others":
-                filtered_df = filtered_df.filter(pl.col(category) == selected_value)
+    if active_tab != "rawdata":
+        raise PreventUpdate
 
-    # apply time series date filtering
+    if page_current is None or page_size is None or not project_name:
+        raise PreventUpdate
+
+    filters = selected_pie_data or {}
     if selected_date:
-        if isinstance(selected_date, str):
-            # for exact date match, convert to date for comparison
-            selected_date_parsed = pd.to_datetime(selected_date).date()
-            filtered_df = filtered_df.filter(pl.col("first_public").dt.date() == selected_date_parsed)
-        elif isinstance(selected_date, dict):
-            start_date = selected_date.get("start")
-            end_date = selected_date.get("end")
+        filters["date_filter"] = selected_date
 
-            if start_date:
-                start_parsed = pl.lit(start_date).str.to_date()
-                filtered_df = filtered_df.filter(pl.col("first_public").dt.date() >= start_parsed)
-            if end_date:
-                end_parsed = pl.lit(end_date).str.to_date()
-                filtered_df = filtered_df.filter(pl.col("first_public").dt.date() <= end_parsed)
-
-    # group by biosample and aggregate
-    grouped_df = filtered_df.group_by("organisms.biosample_id").agg([
-        pl.col("common_name").first().alias("common_name"),
-        pl.col("current_status").first().alias("current_status"),
-        pl.col("tax_id").first().alias("tax_id"),
-        pl.col("symbionts_status").first().alias("symbionts_status"),
-        pl.col("organisms.organism").first().alias("organisms.organism"),
-    ])
-
-    link_prefix =  PORTAL_URL_PREFIX.get(project_name, "")
-
-    if project_name == "erga" or project_name == "gbdp":
-        url_param = "tax_id"
-    else:
-        url_param = "organisms.organism"
-
-    grouped_df = grouped_df.with_columns(
-        pl.when(pl.col("organisms.organism").is_not_null())
-        .then(
-            pl.format(
-                f"[{{}}]({link_prefix}{{}})",
-                pl.col("organisms.organism"),
-                pl.col(url_param)
-                .map_elements(lambda x: urllib.parse.quote(str(x)), return_dtype=pl.Utf8)
-            )
-        )
-        .otherwise(pl.lit(""))
-        .alias("organism_link")
-    )
-
-    grouped_df = grouped_df.unique(subset=[
-        "organism_link", "common_name", "current_status", "symbionts_status"
-    ])
-
-    grouped_df = grouped_df.sort(by="current_status", descending=False)
+    table_data, total_count = load_table_data(project_name, filters, page_current, page_size, "rawdata")
 
     # pagination
-    total_rows = len(grouped_df)
-    total_pages = max(math.ceil(total_rows / page_size), 1)
+    total_pages = max(math.ceil(total_count / page_size), 1)
     page_current = min(page_current, total_pages - 1)
 
+    # organism count header
+    filters_applied = any(v for v in filters.values() if v)
+    if filters_applied:
+        filter_text = "matching your selection"
+    else:
+        filter_text = "in total"
+
+    count_header = f"{total_count:,} organisms found {filter_text}"
+
     return (
-        grouped_df.slice(page_current * page_size, page_size).to_dicts(),
+        table_data.to_dict('records'),
         total_pages,
-        page_current
+        page_current,
+        count_header
     )
