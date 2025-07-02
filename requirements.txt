@@ -3,8 +3,8 @@ dash_bootstrap_components[pandas]>=1.7.1
 gunicorn>=23.0.0
 pyarrow>=19.0.1
 gcsfs>=2025.3.2
-dash-cytoscape
-dash_extensions
+dash-cytoscape==1.0.2
+dash_extensions==1.0.20
 polars==1.30.0
 google-cloud-bigquery==3.34.0
 db-dtypes==1.4.3
