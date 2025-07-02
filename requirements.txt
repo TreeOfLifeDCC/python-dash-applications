@@ -6,3 +6,6 @@ gcsfs>=2025.3.2
 dash-cytoscape==1.0.2
 dash_extensions==1.0.20
 polars==1.30.0
+google-cloud-bigquery==3.34.0
+db-dtypes==1.4.3
+
