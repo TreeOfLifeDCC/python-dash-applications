@@ -82,25 +82,25 @@ def build_sampling_map_query(project_name: str) -> str:
         phylogenetic_tree,
         SAFE_CAST(latitude AS FLOAT64) as lat,
         SAFE_CAST(longitude AS FLOAT64) as lon,
-        CASE 
-          WHEN STRING_AGG(DISTINCT 
-            CASE 
-              WHEN library_construction_protocol IS NOT NULL 
-                AND TRIM(library_construction_protocol) != '' 
-              THEN library_construction_protocol 
-            END, ', ') IS NULL 
+        CASE
+          WHEN STRING_AGG(DISTINCT
+            CASE
+              WHEN library_construction_protocol IS NOT NULL
+                AND TRIM(library_construction_protocol) != ''
+              THEN library_construction_protocol
+            END, ', ') IS NULL
           THEN 'No experiment data'
-          ELSE STRING_AGG(DISTINCT 
-            CASE 
-              WHEN library_construction_protocol IS NOT NULL 
-                AND TRIM(library_construction_protocol) != '' 
-              THEN library_construction_protocol 
+          ELSE STRING_AGG(DISTINCT
+            CASE
+              WHEN library_construction_protocol IS NOT NULL
+                AND TRIM(library_construction_protocol) != ''
+              THEN library_construction_protocol
             END, ', ')
         END as experiment_type,
         CONCAT(SAFE_CAST(latitude AS STRING), ',', SAFE_CAST(longitude AS STRING)) as geotag
       FROM base_data
-      GROUP BY 
-        biosample_id, organism, current_status, tax_id, symbionts_status, 
+      GROUP BY
+        biosample_id, organism, current_status, tax_id, symbionts_status,
         common_name, phylogenetic_tree, latitude, longitude
     ),
 
@@ -136,7 +136,7 @@ def build_sampling_map_query(project_name: str) -> str:
       GROUP BY geotag, lat, lon
     )
 
-    SELECT 
+    SELECT
       'detailed' as data_type,
       biosample_id,
       organism,
@@ -160,7 +160,7 @@ def build_sampling_map_query(project_name: str) -> str:
 
     UNION ALL
 
-    SELECT 
+    SELECT
       'grouped' as data_type,
       CAST(NULL AS STRING) as biosample_id,
       CAST(NULL AS STRING) as organism,
