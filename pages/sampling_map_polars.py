@@ -21,16 +21,8 @@ client = bigquery.Client(
     project="prj-ext-prod-biodiv-data-in"
 )
 
-
 # cache for pre-aggregated data
 DATASETS = {}
-
-PROJECT_TABLE_MAP = {
-    "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
-    "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
-    "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
-    "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
-}
 
 PORTAL_URL_PREFIX = {
     "dtol": "https://portal.darwintreeoflife.org/data/",
@@ -40,160 +32,43 @@ PORTAL_URL_PREFIX = {
 }
 
 
-# query for sampling map data
-def build_sampling_map_query(project_name: str) -> str:
-    table_name = PROJECT_TABLE_MAP.get(project_name, PROJECT_TABLE_MAP["dtol"])
-
-    query = f"""
-    WITH base_data AS (
-      SELECT
-        main.current_status,
-        main.tax_id,
-        main.symbionts_status,
-        main.common_name,
-        main.phylogenetic_tree,
-        organism.biosample_id,
-        organism.organism,
-        organism.latitude,
-        organism.longitude,
-        raw_data_item.library_construction_protocol
-      FROM `{table_name}` as main,
-      UNNEST(main.organisms) as organism
-      LEFT JOIN UNNEST(main.raw_data) as raw_data_item
-      ON TRUE
-      WHERE organism.biosample_id IS NOT NULL
-        AND organism.organism IS NOT NULL
-        AND organism.latitude IS NOT NULL
-        AND organism.longitude IS NOT NULL
-        AND SAFE_CAST(organism.latitude AS FLOAT64) IS NOT NULL
-        AND SAFE_CAST(organism.longitude AS FLOAT64) IS NOT NULL
-        AND SAFE_CAST(organism.latitude AS FLOAT64) BETWEEN -90 AND 90
-        AND SAFE_CAST(organism.longitude AS FLOAT64) BETWEEN -180 AND 180
-    ),
-
-    processed_data AS (
-      SELECT
-        biosample_id,
-        organism,
-        current_status,
-        tax_id,
-        symbionts_status,
-        common_name,
-        phylogenetic_tree,
-        SAFE_CAST(latitude AS FLOAT64) as lat,
-        SAFE_CAST(longitude AS FLOAT64) as lon,
-        CASE
-          WHEN STRING_AGG(DISTINCT
-            CASE
-              WHEN library_construction_protocol IS NOT NULL
-                AND TRIM(library_construction_protocol) != ''
-              THEN library_construction_protocol
-            END, ', ') IS NULL
-          THEN 'No experiment data'
-          ELSE STRING_AGG(DISTINCT
-            CASE
-              WHEN library_construction_protocol IS NOT NULL
-                AND TRIM(library_construction_protocol) != ''
-              THEN library_construction_protocol
-            END, ', ')
-        END as experiment_type,
-        CONCAT(SAFE_CAST(latitude AS STRING), ',', SAFE_CAST(longitude AS STRING)) as geotag
-      FROM base_data
-      GROUP BY
-        biosample_id, organism, current_status, tax_id, symbionts_status,
-        common_name, phylogenetic_tree, latitude, longitude
-    ),
-
-    detailed_data AS (
-      SELECT
-        biosample_id,
-        organism,
-        current_status,
-        tax_id,
-        symbionts_status,
-        common_name,
-        phylogenetic_tree.kingdom.scientific_name as Kingdom,
-        lat,
-        lon,
-        experiment_type,
-        geotag
-      FROM processed_data
-    ),
-
-    grouped_data AS (
-      SELECT
-        geotag,
-        lat,
-        lon,
-        STRING_AGG(DISTINCT biosample_id, ', ') as biosample_ids,
-        STRING_AGG(DISTINCT organism, ', ') as organisms,
-        ARRAY_AGG(DISTINCT Kingdom IGNORE NULLS) as kingdoms,
-        STRING_AGG(DISTINCT common_name, ', ') as common_names,
-        STRING_AGG(DISTINCT current_status, ', ') as current_statuses,
-        STRING_AGG(DISTINCT experiment_type, ', ') as experiment_types,
-        COUNT(DISTINCT organism) as record_count
-      FROM detailed_data
-      GROUP BY geotag, lat, lon
-    )
-
-    SELECT
-      'detailed' as data_type,
-      biosample_id,
-      organism,
-      current_status,
-      tax_id,
-      symbionts_status,
-      common_name,
-      Kingdom,
-      lat,
-      lon,
-      experiment_type,
-      geotag,
-      CAST(NULL AS STRING) as biosample_ids,
-      CAST(NULL AS STRING) as organisms,
-      CAST(NULL AS ARRAY<STRING>) as kingdoms,
-      CAST(NULL AS STRING) as common_names,
-      CAST(NULL AS STRING) as current_statuses,
-      CAST(NULL AS STRING) as experiment_types,
-      CAST(NULL AS INT64) as record_count
-    FROM detailed_data
-
-    UNION ALL
-
-    SELECT
-      'grouped' as data_type,
-      CAST(NULL AS STRING) as biosample_id,
-      CAST(NULL AS STRING) as organism,
-      CAST(NULL AS STRING) as current_status,
-      CAST(NULL AS INT64) as tax_id,
-      CAST(NULL AS STRING) as symbionts_status,
-      CAST(NULL AS STRING) as common_name,
-      CAST(NULL AS STRING) as Kingdom,
-      lat,
-      lon,
-      CAST(NULL AS STRING) as experiment_type,
-      geotag,
-      biosample_ids,
-      organisms,
-      kingdoms,
-      common_names,
-      current_statuses,
-      experiment_types,
-      record_count
-    FROM grouped_data
-
-    ORDER BY data_type, geotag
-    """
-
-    return query
-
-
 def load_data(project_name: str) -> dict:
     if project_name in DATASETS:
         return DATASETS[project_name]
 
     print(f"Loading sampling map data for {project_name}...")
-    query = build_sampling_map_query(project_name)
+
+    detailed_query = f"""
+    SELECT 
+        biosample_id,
+        organism,
+        current_status,
+        tax_id,
+        symbionts_status,
+        common_name,
+        Kingdom,
+        lat,
+        lon,
+        experiment_type,
+        geotag
+    FROM `prj-ext-prod-biodiv-data-in.{project_name}.sampling_map_base`
+    """
+
+    # grouped data from the aggregated view
+    grouped_query = f"""
+    SELECT 
+        geotag,
+        lat,
+        lon,
+        biosample_ids,
+        organisms,
+        kingdoms,
+        common_names,
+        current_statuses,
+        experiment_types,
+        record_count
+    FROM `prj-ext-prod-biodiv-data-in.{project_name}.sampling_map_aggregated`
+    """
 
     job_config = bigquery.QueryJobConfig(
         use_query_cache=True,
@@ -201,15 +76,16 @@ def load_data(project_name: str) -> dict:
         maximum_bytes_billed=10 ** 12
     )
 
-    query_job = client.query(query, job_config=job_config)
-    df_pandas = query_job.to_dataframe(create_bqstorage_client=True)
-    df_polars = pl.from_pandas(df_pandas)
+    detailed_job = client.query(detailed_query, job_config=job_config)
+    grouped_job = client.query(grouped_query, job_config=job_config)
 
-    # split into detailed and grouped data
-    detailed_data = df_polars.filter(pl.col('data_type') == 'detailed').drop('data_type')
-    grouped_data = df_polars.filter(pl.col('data_type') == 'grouped').drop('data_type')
+    detailed_df_pandas = detailed_job.to_dataframe(create_bqstorage_client=True)
+    grouped_df_pandas = grouped_job.to_dataframe(create_bqstorage_client=True)
 
-    # detailed data
+    detailed_data = pl.from_pandas(detailed_df_pandas)
+    grouped_data = pl.from_pandas(grouped_df_pandas)
+
+    # add organism links to detailed data
     link_prefix = PORTAL_URL_PREFIX.get(project_name, "")
     url_param = "tax_id" if project_name in ["erga", "gbdp"] else "organism"
 
@@ -231,7 +107,7 @@ def load_data(project_name: str) -> dict:
         .alias("organism_link")
     ])
 
-    # grouped data - handle kingdoms array
+    # grouped data - kingdoms array
     grouped_data = grouped_data.with_columns([
         pl.when(pl.col("kingdoms").is_not_null())
         .then(pl.col("kingdoms").list.first())
@@ -251,6 +127,42 @@ def load_data(project_name: str) -> dict:
 @lru_cache(maxsize=10)
 def load_data_cached(project_name):
     return load_data(project_name)
+
+
+@lru_cache(maxsize=10)
+def get_filter_options(project_name: str) -> dict:
+    query = f"""
+    SELECT 
+        all_organisms,
+        all_common_names,
+        all_current_statuses,
+        all_experiment_types
+    FROM `prj-ext-prod-biodiv-data-in.{project_name}.sampling_map_filter_options`
+    """
+
+    result = client.query(query).to_dataframe()
+
+    if result.empty:
+        return {
+            'all_organisms': [],
+            'all_common_names': [],
+            'all_current_statuses': [],
+            'all_experiment_types': []
+        }
+
+    def array_to_list(arr):
+        if arr is None:
+            return []
+
+        arr_list = list(arr)
+        return sorted(arr_list) if arr_list else []
+
+    return {
+        'all_organisms': array_to_list(result['all_organisms'].iloc[0]),
+        'all_common_names': array_to_list(result['all_common_names'].iloc[0]),
+        'all_current_statuses': array_to_list(result['all_current_statuses'].iloc[0]),
+        'all_experiment_types': array_to_list(result['all_experiment_types'].iloc[0])
+    }
 
 
 def layout(**kwargs):
@@ -737,59 +649,112 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                       search_organism, search_common_name, search_current_status, search_experiment_type,
                       checklist_selection_order, project_name,
                       click_flag_value, selection_flag_value, selected_data, click_data, selected_geotags):
-    df_lazy = DATASETS[project_name]["df_data"].lazy()
+    try:
+        view_options = get_filter_options(project_name)
 
-    if selected_geotags:
-        df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
+        if selected_geotags:
+            df_lazy = DATASETS[project_name]["df_data"].lazy()
+            df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
 
-    df_processed = df_lazy.with_columns([
-        # Handle organism column
-        pl.when(pl.col("organism").is_not_null())
-        .then(pl.concat_list([pl.col("organism").cast(pl.Utf8)]))
-        .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
-        .alias("organisms_split"),
+            # get filtered options
+            df_processed = df_lazy.with_columns([
+                pl.when(pl.col("organism").is_not_null())
+                .then(pl.concat_list([pl.col("organism").cast(pl.Utf8)]))
+                .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
+                .alias("organisms_split"),
 
-        # Handle experiment_type column - split by comma
-        pl.when(pl.col("experiment_type").is_not_null())
-        .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
-        .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
-        .alias("experiment_type_split"),
+                pl.when(pl.col("experiment_type").is_not_null())
+                .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
+                .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
+                .alias("experiment_type_split"),
 
-        pl.col("common_name").cast(pl.Utf8),
-        pl.col("current_status").cast(pl.Utf8)
-    ])
+                pl.col("common_name").cast(pl.Utf8),
+                pl.col("current_status").cast(pl.Utf8)
+            ])
 
-    df_org_exploded = df_processed.explode("organisms_split").filter(pl.col("organisms_split").is_not_null())
-    df_exp_exploded = df_processed.explode("experiment_type_split").filter(
-        pl.col("experiment_type_split").is_not_null())
+            all_organisms = sorted(
+                df_processed.select(pl.col("organisms_split").flatten().drop_nulls().unique())
+                .collect()
+                .to_series()
+                .to_list()
+            )
 
-    all_organisms = sorted(
-        df_processed.select(pl.col("organisms_split").flatten().drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+            all_common_names = sorted(
+                df_processed.select(pl.col("common_name").drop_nulls().unique())
+                .collect()
+                .to_series()
+                .to_list()
+            )
 
-    all_common_names = sorted(
-        df_processed.select(pl.col("common_name").drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+            all_current_status = sorted(
+                df_processed.select(pl.col("current_status").drop_nulls().unique())
+                .collect()
+                .to_series()
+                .to_list()
+            )
 
-    all_current_status = sorted(
-        df_processed.select(pl.col("current_status").drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+            all_experiment_type = sorted(
+                df_processed.select(pl.col("experiment_type_split").flatten().drop_nulls().unique())
+                .collect()
+                .to_series()
+                .to_list()
+            )
+        else:
+            all_organisms = view_options['all_organisms']
+            all_common_names = view_options['all_common_names']
+            all_current_status = view_options['all_current_statuses']
+            all_experiment_type = view_options['all_experiment_types']
 
-    all_experiment_type = sorted(
-        df_processed.select(pl.col("experiment_type_split").flatten().drop_nulls().unique())
-        .collect()
-        .to_series()
-        .to_list()
-    )
+    except Exception as e:
+        print(f"Error loading filter options from view: {e}")
+        # original logic if view fails
+        df_lazy = DATASETS[project_name]["df_data"].lazy()
+
+        if selected_geotags:
+            df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
+
+        df_processed = df_lazy.with_columns([
+            pl.when(pl.col("organism").is_not_null())
+            .then(pl.concat_list([pl.col("organism").cast(pl.Utf8)]))
+            .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
+            .alias("organisms_split"),
+
+            pl.when(pl.col("experiment_type").is_not_null())
+            .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
+            .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
+            .alias("experiment_type_split"),
+
+            pl.col("common_name").cast(pl.Utf8),
+            pl.col("current_status").cast(pl.Utf8)
+        ])
+
+        all_organisms = sorted(
+            df_processed.select(pl.col("organisms_split").flatten().drop_nulls().unique())
+            .collect()
+            .to_series()
+            .to_list()
+        )
+
+        all_common_names = sorted(
+            df_processed.select(pl.col("common_name").drop_nulls().unique())
+            .collect()
+            .to_series()
+            .to_list()
+        )
+
+        all_current_status = sorted(
+            df_processed.select(pl.col("current_status").drop_nulls().unique())
+            .collect()
+            .to_series()
+            .to_list()
+        )
+
+        all_experiment_type = sorted(
+            df_processed.select(pl.col("experiment_type_split").flatten().drop_nulls().unique())
+            .collect()
+            .to_series()
+            .to_list()
+        )
 
     all_values = {
         "all_organisms": all_organisms,
@@ -812,7 +777,7 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
 
     lookup_tables = {}
 
-    # Only build lookup tables if we have user selections
+    # build lookup tables if we have user selections
     user_selection = False
     checklist_mappings = {
         "organism-checklist": "selected_organisms",
@@ -826,6 +791,33 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
 
     if selections_list and len(selections_list) > 0:
         user_selection = True
+
+        if selected_geotags:
+            df_lazy = DATASETS[project_name]["df_data"].lazy()
+            df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
+        else:
+            df_lazy = DATASETS[project_name]["df_data"].lazy()
+
+        df_processed = df_lazy.with_columns([
+            # organism column
+            pl.when(pl.col("organism").is_not_null())
+            .then(pl.concat_list([pl.col("organism").cast(pl.Utf8)]))
+            .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
+            .alias("organisms_split"),
+
+            # experiment_type column - split by comma
+            pl.when(pl.col("experiment_type").is_not_null())
+            .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
+            .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
+            .alias("experiment_type_split"),
+
+            pl.col("common_name").cast(pl.Utf8),
+            pl.col("current_status").cast(pl.Utf8)
+        ])
+
+        df_org_exploded = df_processed.explode("organisms_split").filter(pl.col("organisms_split").is_not_null())
+        df_exp_exploded = df_processed.explode("experiment_type_split").filter(
+            pl.col("experiment_type_split").is_not_null())
 
         lookup_queries = []
 
@@ -945,7 +937,7 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                 ])
             ])
 
-        # collect all lookup queries
+        # lookup queries
         if lookup_queries:
             combined_lookups = pl.concat(lookup_queries).collect()
 
@@ -1228,7 +1220,7 @@ def update_click_flag(click_data, selected_data, selected_organisms, selected_co
 
         return False, selected_data, True, selected_geotags, organisms
 
-    # default case: no relevant trigger, or data unchanged
+    # default case
     return no_update, prev_click_data, no_update, no_update, no_update
 
 
@@ -1270,9 +1262,16 @@ def build_table(click_flag_value, selection_flag_value, selected_data, click_dat
         filtered_df = filtered_df.filter(pl.col("current_status").is_in(selected_current_status))
 
     if selected_experiment_types:
-        filtered_df = filtered_df.filter(pl.col("experiment_type").is_in(selected_experiment_types))
+        filtered_df = filtered_df.filter(
+            pl.col("experiment_type")
+            .drop_nulls()
+            .str.strip_chars()
+            .str.split(", ")
+            .list.eval(pl.element().str.strip_chars())
+            .list.eval(pl.element().is_in(selected_experiment_types))
+            .list.any()
+        )
 
-    # build the complete lazy query pipeline
     processed_df = filtered_df.group_by(['geotag', 'biosample_id']).agg([
         pl.col("experiment_type")
         .drop_nulls()
@@ -1297,7 +1296,7 @@ def build_table(click_flag_value, selection_flag_value, selected_data, click_dat
         "symbionts_status"
     ]).sort("current_status")
 
-    # get the count for pagination calculation
+    # get count for pagination
     total_records = processed_df.select(pl.len()).collect().item()
 
     # pagination
@@ -1307,7 +1306,7 @@ def build_table(click_flag_value, selection_flag_value, selected_data, click_dat
     start_idx = page_current * page_size
     paginated_df = processed_df.slice(start_idx, page_size).collect()
 
-    # convert to records for the datatable
+    # convert to records
     records = paginated_df.to_dicts()
 
     return (

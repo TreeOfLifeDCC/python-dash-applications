@@ -29,11 +29,27 @@ METADATA_AGGREGATED_DATA = {}
 RAWDATA_AGGREGATED_DATA = {}
 
 
-PROJECT_TABLE_MAP = {
-    "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
-    "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
-    "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
-    "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
+VIEW_MAPPINGS = {
+    "dtol": {
+        "metadata_aggregated": "prj-ext-prod-biodiv-data-in.dtol.metadata_aggregated",
+        "rawdata_aggregated": "prj-ext-prod-biodiv-data-in.dtol.rawdata_aggregated",
+        "table_data": "prj-ext-prod-biodiv-data-in.dtol.table_data"
+    },
+    "erga": {
+        "metadata_aggregated": "prj-ext-prod-biodiv-data-in.erga.metadata_aggregated",
+        "rawdata_aggregated": "prj-ext-prod-biodiv-data-in.erga.rawdata_aggregated",
+        "table_data": "prj-ext-prod-biodiv-data-in.erga.table_data"
+    },
+    "asg": {
+        "metadata_aggregated": "prj-ext-prod-biodiv-data-in.asg.metadata_aggregated",
+        "rawdata_aggregated": "prj-ext-prod-biodiv-data-in.asg.rawdata_aggregated",
+        "table_data": "prj-ext-prod-biodiv-data-in.asg.table_data"
+    },
+    "gbdp": {
+        "metadata_aggregated": "prj-ext-prod-biodiv-data-in.gbdp.metadata_aggregated",
+        "rawdata_aggregated": "prj-ext-prod-biodiv-data-in.gbdp.rawdata_aggregated",
+        "table_data": "prj-ext-prod-biodiv-data-in.gbdp.table_data"
+    }
 }
 
 PORTAL_URL_PREFIX = {
@@ -44,243 +60,120 @@ PORTAL_URL_PREFIX = {
 }
 
 # get base data
-def build_base_data_cte(project_name: str, filters: dict,  tab: str) -> str:
-    table_name = PROJECT_TABLE_MAP.get(project_name, PROJECT_TABLE_MAP["dtol"])
+def build_table_data_query(project_name: str, tab: str, filters: dict, offset: int = 0,
+                           limit: int = 10) -> str:
 
-    where_conditions = []
+    view_name = VIEW_MAPPINGS[project_name]["table_data"]
+
+    where_conditions = [f"project_name = '{project_name}'"]
+
     for key, value in filters.items():
         if value and value != "NULL":
             if tab == 'metadata':
                 if key == "sex":
-                    where_conditions.append(f"organism.sex = '{value}'")
+                    where_conditions.append(f"sex = '{value}'")
                 elif key == "lifestage":
-                    where_conditions.append(f"organism.lifestage = '{value}'")
+                    where_conditions.append(f"lifestage = '{value}'")
                 elif key == "habitat":
-                    where_conditions.append(f"organism.habitat = '{value}'")
+                    where_conditions.append(f"habitat = '{value}'")
             elif tab == "rawdata":
                 if key == "instrument_platform":
-                    where_conditions.append(f"raw_data_item.instrument_platform = '{value}'")
+                    where_conditions.append(f"instrument_platform = '{value}'")
                 elif key == "instrument_model":
-                    where_conditions.append(f"raw_data_item.instrument_model = '{value}'")
+                    where_conditions.append(f"instrument_model = '{value}'")
                 elif key == "library_construction_protocol":
-                    where_conditions.append(f"raw_data_item.library_construction_protocol = '{value}'")
+                    where_conditions.append(f"library_construction_protocol = '{value}'")
                 elif key == "date_filter":
-                    # date filtering
+                    # Date filtering
                     date_info = value
                     if isinstance(date_info, str):
-                        where_conditions.append(
-                            f"SAFE.PARSE_DATE('%Y-%m-%d', raw_data_item.first_public) = '{date_info}'")
+                        where_conditions.append(f"first_public = '{date_info}'")
                     elif isinstance(date_info, dict):
                         start_date = date_info.get("start")
                         end_date = date_info.get("end")
                         if start_date:
-                            where_conditions.append(
-                                f"SAFE.PARSE_DATE('%Y-%m-%d', raw_data_item.first_public) >= '{start_date}'")
+                            where_conditions.append(f"first_public >= '{start_date}'")
                         if end_date:
-                            where_conditions.append(
-                                f"SAFE.PARSE_DATE('%Y-%m-%d', raw_data_item.first_public) <= '{end_date}'")
+                            where_conditions.append(f"first_public <= '{end_date}'")
 
-
-    where_clause = ""
-    if where_conditions:
-        where_clause = "AND " + " AND ".join(where_conditions)
-
-    select_fields = """
-        main.current_status,
-        main.tax_id,
-        main.symbionts_status,
-        main.common_name,
-        organism.biosample_id,
-        organism.organism,
-        organism.sex,
-        organism.lifestage,
-        organism.habitat,
-        raw_data_item.instrument_platform,
-        raw_data_item.instrument_model,
-        raw_data_item.library_construction_protocol,
-        CASE
-         WHEN raw_data_item.first_public IS NOT NULL THEN
-          SAFE.PARSE_DATE('%Y-%m-%d', raw_data_item.first_public)
-         ELSE NULL
-        END as first_public"""
+    where_clause = " AND ".join(where_conditions)
 
     return f"""
-    WITH base_data AS (
-      SELECT
-        {select_fields}
-      FROM `{table_name}` as main,
-      UNNEST(main.organisms) as organism
-      LEFT JOIN UNNEST(main.raw_data) as raw_data_item
-      ON TRUE
-      WHERE organism.biosample_id IS NOT NULL
-        AND organism.organism IS NOT NULL
-        {where_clause}
-    )"""
-
-
-# get complete CTE chain for table queries (data + count)
-def build_table_queries_cte(project_name: str, filters: dict, tab) -> str:
-    base_cte = build_base_data_cte(project_name, filters, tab)
-
-    return f"""
-    {base_cte},
-    grouped_data AS (
-      SELECT
-        current_status,
-        tax_id,
-        symbionts_status,
-        common_name,
-        biosample_id,
-        organism
-      FROM base_data
-      GROUP BY biosample_id, current_status, tax_id, symbionts_status, common_name, organism
-    ),
-    deduplicated_data AS (
-      SELECT DISTINCT
+    SELECT DISTINCT
         organism,
         common_name,
         current_status,
         symbionts_status
-      FROM grouped_data
-    )"""
-
-
-def build_table_data_query(tab: str, project_name: str, filters: dict, offset: int = 0, limit: int = 10) -> str:
-    cte = build_table_queries_cte(project_name, filters, tab)
-
-    query = f"""
-    {cte}
-    SELECT *
-    FROM deduplicated_data
+    FROM `{view_name}`
+    WHERE {where_clause}
     ORDER BY current_status
     LIMIT {limit}
     OFFSET {offset}
     """
 
-    return query
 
+def build_table_count_query(project_name: str, tab: str, filters: dict) -> str:
 
-def build_table_count_query(tab: str, project_name: str, filters: dict) -> str:
-    cte = build_table_queries_cte(project_name, filters, tab)
+    view_name = VIEW_MAPPINGS[project_name]["table_data"]
 
-    query = f"""
-    {cte}
-    SELECT COUNT(*) as total_count
-    FROM deduplicated_data
+    where_conditions = [f"project_name = '{project_name}'"]
+
+    for key, value in filters.items():
+        if value and value != "NULL":
+            if tab == 'metadata':
+                if key == "sex":
+                    where_conditions.append(f"sex = '{value}'")
+                elif key == "lifestage":
+                    where_conditions.append(f"lifestage = '{value}'")
+                elif key == "habitat":
+                    where_conditions.append(f"habitat = '{value}'")
+            elif tab == "rawdata":
+                if key == "instrument_platform":
+                    where_conditions.append(f"instrument_platform = '{value}'")
+                elif key == "instrument_model":
+                    where_conditions.append(f"instrument_model = '{value}'")
+                elif key == "library_construction_protocol":
+                    where_conditions.append(f"library_construction_protocol = '{value}'")
+                elif key == "date_filter":
+                    # Date filtering
+                    date_info = value
+                    if isinstance(date_info, str):
+                        where_conditions.append(f"first_public = '{date_info}'")
+                    elif isinstance(date_info, dict):
+                        start_date = date_info.get("start")
+                        end_date = date_info.get("end")
+                        if start_date:
+                            where_conditions.append(f"first_public >= '{start_date}'")
+                        if end_date:
+                            where_conditions.append(f"first_public <= '{end_date}'")
+
+    where_clause = " AND ".join(where_conditions)
+
+    return f"""
+    SELECT COUNT(DISTINCT organism) as total_count
+    FROM `{view_name}`
+    WHERE {where_clause}
     """
 
-    return query
+
 
 
 # metadata
-def build_metadata_pre_aggregated_query(tab: str, project_name: str) -> str:
-    base_cte = build_base_data_cte(project_name, {}, tab)
-
-    query = f"""
-    {base_cte},
-
-    -- pre-aggregate data for pie charts
-    sex_aggregates AS (
-      SELECT
-        sex,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count,
-        -- Store ALL data for each group (no limits)
-        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
-        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
-        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
-      FROM base_data
-      WHERE sex IS NOT NULL
-      GROUP BY sex
-    ),
-
-    lifestage_aggregates AS (
-      SELECT
-        lifestage,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count,
-        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
-        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
-        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
-      FROM base_data
-      WHERE lifestage IS NOT NULL
-      GROUP BY lifestage
-    ),
-
-    habitat_aggregates AS (
-      SELECT
-        habitat,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count,
-        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
-        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
-        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
-      FROM base_data
-      WHERE habitat IS NOT NULL
-      GROUP BY habitat
-    ),
-
-    -- pre-aggregate cross-filtered data for each combination
-    cross_filter_data AS (
-      SELECT
-        sex,
-        lifestage,
-        habitat,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count
-      FROM base_data
-      GROUP BY sex, lifestage, habitat
-    )
-
-    -- return all aggregates in a single result set using UNION ALL
-    SELECT 'sex' as dimension, sex as value, record_count, biosample_count,
-           sample_biosample_ids, sample_organisms, sample_statuses,
-           CAST(NULL AS STRING) as filter_sex, CAST(NULL AS STRING) as filter_lifestage, CAST(NULL AS STRING) as filter_habitat
-    FROM sex_aggregates
-
-    UNION ALL
-
-    SELECT 'lifestage' as dimension, lifestage as value, record_count, biosample_count,
-           sample_biosample_ids, sample_organisms, sample_statuses,
-           CAST(NULL AS STRING) as filter_sex, CAST(NULL AS STRING) as filter_lifestage, CAST(NULL AS STRING) as filter_habitat
-    FROM lifestage_aggregates
-
-    UNION ALL
-
-    SELECT 'habitat' as dimension, habitat as value, record_count, biosample_count,
-           sample_biosample_ids, sample_organisms, sample_statuses,
-           CAST(NULL AS STRING) as filter_sex, CAST(NULL AS STRING) as filter_lifestage, CAST(NULL AS STRING) as filter_habitat
-    FROM habitat_aggregates
-
-    UNION ALL
-
-    SELECT 'cross_filter' as dimension,
-           CONCAT(IFNULL(sex, 'NULL'), '|', IFNULL(lifestage, 'NULL'), '|', IFNULL(habitat, 'NULL')) as value,
-           record_count, biosample_count,
-           CAST(NULL AS STRING) as sample_biosample_ids,
-           CAST(NULL AS STRING) as sample_organisms,
-           CAST(NULL AS STRING) as sample_statuses,
-           sex as filter_sex, lifestage as filter_lifestage, habitat as filter_habitat
-    FROM cross_filter_data
-
-    ORDER BY dimension, record_count DESC
-    """
-
-    return query
-
 # load pre-aggregated data for charts
 def load_metadata_aggregated_data(project_name: str) -> dict:
 
     if project_name in METADATA_AGGREGATED_DATA:
         return METADATA_AGGREGATED_DATA[project_name]
 
-    print(f"Loading aggregated data for {project_name}...")
-    query = build_metadata_pre_aggregated_query('metadata', project_name)
+    print(f"Loading aggregated data for {project_name} from views...")
+
+    view_name = VIEW_MAPPINGS[project_name]["metadata_aggregated"]
+    query = f"SELECT * FROM `{view_name}` ORDER BY dimension, record_count DESC"
 
     job_config = bigquery.QueryJobConfig(
         use_query_cache=True,
         use_legacy_sql=False,
-        maximum_bytes_billed=10 ** 12
+        maximum_bytes_billed=10 ** 9
     )
 
     query_job = client.query(query, job_config=job_config)
@@ -299,8 +192,8 @@ def load_metadata_aggregated_data(project_name: str) -> dict:
     return aggregated
 
 
-# get chart data with cross-filtering applied using pre-aggregated data
-def get_metadata_filtered_chart_data(project_name: str, dimension: str, filters: dict) -> pl.DataFrame:
+# get chart data with cross-filtering applied
+def get_metadata_chart_data(project_name: str, dimension: str, filters: dict) -> pl.DataFrame:
 
     aggregated = METADATA_AGGREGATED_DATA[project_name]
     cross_filter_data = aggregated['cross_filter']
@@ -333,156 +226,26 @@ def get_metadata_filtered_chart_data(project_name: str, dimension: str, filters:
 
 
 # raw_data
-def build_rawdata_pre_aggregated_query(tab: str, project_name: str) -> str:
-
-    base_cte = build_base_data_cte(project_name, {}, tab)
-
-    query = f"""
-    {base_cte},
-
-    -- Pre-aggregate data for pie charts
-    instrument_platform_aggregates AS (
-      SELECT
-        instrument_platform,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count,
-        -- Store ALL data for each group (no limits)
-        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
-        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
-        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
-      FROM base_data
-      WHERE instrument_platform IS NOT NULL
-      GROUP BY instrument_platform
-    ),
-
-    instrument_model_aggregates AS (
-      SELECT
-        instrument_model,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count,
-        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
-        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
-        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
-      FROM base_data
-      WHERE instrument_model IS NOT NULL
-      GROUP BY instrument_model
-    ),
-
-    library_protocol_aggregates AS (
-      SELECT
-        library_construction_protocol,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count,
-        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
-        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
-        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
-      FROM base_data
-      WHERE library_construction_protocol IS NOT NULL
-      GROUP BY library_construction_protocol
-    ),
-
-    -- Time series data (by date)
-    time_series_aggregates AS (
-      SELECT
-        first_public,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count,
-        STRING_AGG(DISTINCT biosample_id, ',') as sample_biosample_ids,
-        STRING_AGG(DISTINCT organism, ',') as sample_organisms,
-        STRING_AGG(DISTINCT current_status, ',') as sample_statuses
-      FROM base_data
-      WHERE first_public IS NOT NULL
-      GROUP BY first_public
-    ),
-
-    -- Pre-aggregate cross-filtered data for each combination
-    cross_filter_data AS (
-      SELECT
-        instrument_platform,
-        instrument_model,
-        library_construction_protocol,
-        first_public,
-        COUNT(DISTINCT organism) as record_count,
-        COUNT(DISTINCT biosample_id) as biosample_count
-      FROM base_data
-      GROUP BY instrument_platform, instrument_model, library_construction_protocol, first_public
-    )
-
-    -- Return all aggregates in a single result set using UNION ALL
-    SELECT 'instrument_platform' as dimension, instrument_platform as value, record_count, biosample_count,
-           sample_biosample_ids, sample_organisms, sample_statuses,
-           CAST(NULL AS STRING) as filter_platform, CAST(NULL AS STRING) as filter_model,
-           CAST(NULL AS STRING) as filter_protocol, CAST(NULL AS DATE) as filter_date
-    FROM instrument_platform_aggregates
-
-    UNION ALL
-
-    SELECT 'instrument_model' as dimension, instrument_model as value, record_count, biosample_count,
-           sample_biosample_ids, sample_organisms, sample_statuses,
-           CAST(NULL AS STRING) as filter_platform, CAST(NULL AS STRING) as filter_model,
-           CAST(NULL AS STRING) as filter_protocol, CAST(NULL AS DATE) as filter_date
-    FROM instrument_model_aggregates
-
-    UNION ALL
-
-    SELECT 'library_construction_protocol' as dimension, library_construction_protocol as value, record_count, biosample_count,
-           sample_biosample_ids, sample_organisms, sample_statuses,
-           CAST(NULL AS STRING) as filter_platform, CAST(NULL AS STRING) as filter_model,
-           CAST(NULL AS STRING) as filter_protocol, CAST(NULL AS DATE) as filter_date
-    FROM library_protocol_aggregates
-
-    UNION ALL
-
-    SELECT 'time_series' as dimension, CAST(first_public AS STRING) as value, record_count, biosample_count,
-           sample_biosample_ids, sample_organisms, sample_statuses,
-           CAST(NULL AS STRING) as filter_platform, CAST(NULL AS STRING) as filter_model,
-           CAST(NULL AS STRING) as filter_protocol, CAST(NULL AS DATE) as filter_date
-    FROM time_series_aggregates
-
-    UNION ALL
-
-    SELECT 'cross_filter' as dimension,
-           CONCAT(
-             IFNULL(instrument_platform, 'NULL'), '|',
-             IFNULL(instrument_model, 'NULL'), '|',
-             IFNULL(library_construction_protocol, 'NULL'), '|',
-             IFNULL(CAST(first_public AS STRING), 'NULL')
-           ) as value,
-           record_count, biosample_count,
-           CAST(NULL AS STRING) as sample_biosample_ids,
-           CAST(NULL AS STRING) as sample_organisms,
-           CAST(NULL AS STRING) as sample_statuses,
-           instrument_platform as filter_platform,
-           instrument_model as filter_model,
-           library_construction_protocol as filter_protocol,
-           first_public as filter_date
-    FROM cross_filter_data
-
-    ORDER BY dimension, record_count DESC
-    """
-
-    return query
-
-
 def load_rawdata_aggregated_data(project_name: str) -> dict:
 
     if project_name in RAWDATA_AGGREGATED_DATA:
         return RAWDATA_AGGREGATED_DATA[project_name]
 
-    print(f"Loading raw data aggregated data for {project_name}...")
-    query = build_rawdata_pre_aggregated_query('rawdata', project_name)
+    print(f"Loading raw data aggregated data for {project_name} from views...")
+
+    view_name = VIEW_MAPPINGS[project_name]["rawdata_aggregated"]
+    query = f"SELECT * FROM `{view_name}` ORDER BY dimension, record_count DESC"
 
     job_config = bigquery.QueryJobConfig(
         use_query_cache=True,
         use_legacy_sql=False,
-        maximum_bytes_billed=10 ** 12
+        maximum_bytes_billed=10 ** 9
     )
 
     query_job = client.query(query, job_config=job_config)
     df_pandas = query_job.to_dataframe(create_bqstorage_client=True)
     df_polars = pl.from_pandas(df_pandas)
 
-    # Organize data by dimension
     aggregated = {
         'instrument_platform': df_polars.filter(pl.col('dimension') == 'instrument_platform'),
         'instrument_model': df_polars.filter(pl.col('dimension') == 'instrument_model'),
@@ -496,8 +259,8 @@ def load_rawdata_aggregated_data(project_name: str) -> dict:
     return aggregated
 
 
-# get chart data with cross-filtering applied using pre-aggregated data
-def get_filtered_rawdata_chart_data(project_name: str, dimension: str, filters: dict) -> pl.DataFrame:
+# get chart data with cross-filtering applied
+def get_rawdata_chart_data(project_name: str, dimension: str, filters: dict) -> pl.DataFrame:
     aggregated = RAWDATA_AGGREGATED_DATA[project_name]
     cross_filter_data = aggregated['cross_filter']
 
@@ -527,7 +290,7 @@ def get_filtered_rawdata_chart_data(project_name: str, dimension: str, filters: 
                         end_parsed = pl.lit(end_date).str.to_date()
                         filtered_data = filtered_data.filter(pl.col("filter_date") <= end_parsed)
 
-    # Aggregate by the target dimension
+    # aggregate by dimension
     if dimension == "instrument_platform":
         result = filtered_data.group_by("filter_platform").agg([
             pl.col("record_count").sum().alias("record_count"),
@@ -565,7 +328,6 @@ def fill_missing_dates_polars(time_series_df: pl.DataFrame) -> pl.DataFrame:
     min_date = time_series_df['Date'].min()
     max_date = time_series_df['Date'].max()
 
-    # create date range in polars
     date_range = pl.date_range(
         min_date,
         max_date,
@@ -627,7 +389,7 @@ def create_time_series_colors_polars(time_series_df: pl.DataFrame, stored_date) 
 
 
 # generic functions
-def limit_grouped_data_optimized(df: pl.DataFrame, col: str, top_n: int = 10) -> pl.DataFrame:
+def limit_grouped_data(df: pl.DataFrame, col: str, top_n: int = 10) -> pl.DataFrame:
     if len(df) <= top_n:
         return df
 
@@ -720,7 +482,7 @@ def build_pie_optimized(df: pl.DataFrame, col_name: str, selected_val: str, type
         pl.col("value_display"),
         pl.col("value").alias("original_value"),
         pl.col("biosample_count").alias("biosample_count"),
-        pl.col("percentage").alias("percentage")  # Add percentage to lookup
+        pl.col("percentage").alias("percentage")
     ).to_dicts()
 
     lookup_map = {item["value_display"]: (item["biosample_count"], item["original_value"], item["percentage"]) for item
@@ -776,20 +538,17 @@ def build_pie_optimized(df: pl.DataFrame, col_name: str, selected_val: str, type
 
 
 def load_table_data(project_name: str, filters: dict, page_current: int, page_size: int, tab: str):
+
     offset = page_current * page_size
 
-    # get table data
-    if tab == "metadata":
-        data_query = build_table_data_query('metadata', project_name, filters, offset, page_size)
-        count_query = build_table_count_query('metadata', project_name, filters)
-    elif tab == "rawdata":
-        data_query = build_table_data_query('rawdata', project_name, filters, offset, page_size)
-        count_query = build_table_count_query('rawdata', project_name, filters)
+    # table data using views
+    data_query = build_table_data_query(project_name, tab, filters, offset, page_size)
+    count_query = build_table_count_query(project_name, tab, filters)
 
     data_job = client.query(data_query)
     data_df = data_job.to_dataframe()
 
-    # pagination
+    # pagination count
     count_job = client.query(count_query)
     count_result = count_job.to_dataframe()
     total_count = count_result['total_count'].iloc[0] if not count_result.empty else 0
@@ -1059,13 +818,13 @@ def layout(**kwargs):
     ])
 
     return dbc.Container([
-        dcc.Store(id="active-tab-store", data="metadata"),  # ADD THIS LINE
+        dcc.Store(id="active-tab-store", data="metadata"),
         dcc.Tabs(
-            id="main-tabs",  # ADD THIS ID
-            value="metadata",  # ADD THIS
+            id="main-tabs",
+            value="metadata",
             children=[
-                dcc.Tab(label='Metadata', value="metadata", children=[tab1_content]),  # ADD value
-                dcc.Tab(label='Raw Data', value="rawdata", children=[tab2_content]),   # ADD value
+                dcc.Tab(label='Metadata', value="metadata", children=[tab1_content]),
+                dcc.Tab(label='Raw Data', value="rawdata", children=[tab2_content]),
             ]
         )
     ], fluid=True)
@@ -1174,8 +933,8 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
     # build charts with pre-aggregated data
     pies = {}
     for dimension in ["sex", "lifestage", "habitat"]:
-        chart_data = get_metadata_filtered_chart_data(project_name, dimension, stored_selection)
-        limited_data = limit_grouped_data_optimized(chart_data, dimension)
+        chart_data = get_metadata_chart_data(project_name, dimension, stored_selection)
+        limited_data = limit_grouped_data(chart_data, dimension)
         pies[dimension] = build_pie_optimized(limited_data, dimension, stored_selection[dimension])
 
     return pies["sex"], pies["lifestage"], pies["habitat"], stored_selection
@@ -1399,30 +1158,30 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
     if stored_date:
         filters["date_filter"] = stored_date
 
-    # charts using pre-aggregated data
+    # charts
     pies = {}
     for dimension in ["instrument_platform", "instrument_model", "library_construction_protocol"]:
-        chart_data = get_filtered_rawdata_chart_data(project_name, dimension, filters)
-        limited_data = limit_grouped_data_optimized(chart_data, dimension)
+        chart_data = get_rawdata_chart_data(project_name, dimension, filters)
+        limited_data = limit_grouped_data(chart_data, dimension)
         pies[dimension] = build_pie_optimized(limited_data, dimension, stored_selection[dimension],
                                                       'doughnut_chart')
 
     # time series chart
-    time_series_data = get_filtered_rawdata_chart_data(project_name, "time_series",
-                                                       {k: v for k, v in filters.items() if k != "date_filter"})
+    time_series_data = get_rawdata_chart_data(project_name, "time_series",
+                                              {k: v for k, v in filters.items() if k != "date_filter"})
 
-    # process time series data
+    # time series data
     if len(time_series_data) > 0:
-        # check if 'value' is a date type or string
+        # check if 'value' is date type or string
         if time_series_data.schema['value'] == pl.Date:
-            # if it's already a date, just rename it
+            # date - rename
             time_series_df = time_series_data.with_columns([
                 pl.col("value").alias("Date"),
                 pl.col("record_count").alias("Organism Count"),
                 pl.col("biosample_count").alias("BioSample IDs Count")
             ]).sort("Date")
         else:
-            # it's a string, parse it
+            # string
             time_series_df = time_series_data.with_columns([
                 pl.col("value").str.strptime(pl.Date, format="%Y-%m-%d").alias("Date"),
                 pl.col("record_count").alias("Organism Count"),
