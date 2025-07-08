@@ -8,7 +8,6 @@ import polars as pl
 import google.auth
 from google.cloud import bigquery
 from functools import lru_cache
-from google.oauth2 import service_account
 
 dash.register_page(
     __name__,
@@ -127,42 +126,6 @@ def load_data(project_name: str) -> dict:
 @lru_cache(maxsize=10)
 def load_data_cached(project_name):
     return load_data(project_name)
-
-
-@lru_cache(maxsize=10)
-def get_filter_options(project_name: str) -> dict:
-    query = f"""
-    SELECT 
-        all_organisms,
-        all_common_names,
-        all_current_statuses,
-        all_experiment_types
-    FROM `prj-ext-prod-biodiv-data-in.{project_name}.sampling_map_filter_options`
-    """
-
-    result = client.query(query).to_dataframe()
-
-    if result.empty:
-        return {
-            'all_organisms': [],
-            'all_common_names': [],
-            'all_current_statuses': [],
-            'all_experiment_types': []
-        }
-
-    def array_to_list(arr):
-        if arr is None:
-            return []
-
-        arr_list = list(arr)
-        return sorted(arr_list) if arr_list else []
-
-    return {
-        'all_organisms': array_to_list(result['all_organisms'].iloc[0]),
-        'all_common_names': array_to_list(result['all_common_names'].iloc[0]),
-        'all_current_statuses': array_to_list(result['all_current_statuses'].iloc[0]),
-        'all_experiment_types': array_to_list(result['all_experiment_types'].iloc[0])
-    }
 
 
 def layout(**kwargs):
@@ -649,112 +612,58 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                       search_organism, search_common_name, search_current_status, search_experiment_type,
                       checklist_selection_order, project_name,
                       click_flag_value, selection_flag_value, selected_data, click_data, selected_geotags):
-    try:
-        view_options = get_filter_options(project_name)
 
-        if selected_geotags:
-            df_lazy = DATASETS[project_name]["df_data"].lazy()
-            df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
+    df_lazy = DATASETS[project_name]["df_data"].lazy()
 
-            # get filtered options
-            df_processed = df_lazy.with_columns([
-                pl.when(pl.col("organism").is_not_null())
-                .then(pl.concat_list([pl.col("organism").cast(pl.Utf8)]))
-                .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
-                .alias("organisms_split"),
+    if selected_geotags:
+        df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
 
-                pl.when(pl.col("experiment_type").is_not_null())
-                .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
-                .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
-                .alias("experiment_type_split"),
+    # filtered options
+    df_processed = df_lazy.with_columns([
+        pl.when(pl.col("organism").is_not_null())
+        .then(pl.concat_list([pl.col("organism").cast(pl.Utf8)]))
+        .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
+        .alias("organisms_split"),
 
-                pl.col("common_name").cast(pl.Utf8),
-                pl.col("current_status").cast(pl.Utf8)
-            ])
+        pl.when(pl.col("experiment_type").is_not_null())
+        .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
+        .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
+        .alias("experiment_type_split"),
 
-            all_organisms = sorted(
-                df_processed.select(pl.col("organisms_split").flatten().drop_nulls().unique())
-                .collect()
-                .to_series()
-                .to_list()
-            )
+        pl.col("common_name").cast(pl.Utf8),
+        pl.col("current_status").cast(pl.Utf8)
+    ])
 
-            all_common_names = sorted(
-                df_processed.select(pl.col("common_name").drop_nulls().unique())
-                .collect()
-                .to_series()
-                .to_list()
-            )
+    all_organisms = sorted(
+        df_processed.select(pl.col("organisms_split").flatten().drop_nulls().unique())
+        .collect()
+        .to_series()
+        .to_list()
+    )
 
-            all_current_status = sorted(
-                df_processed.select(pl.col("current_status").drop_nulls().unique())
-                .collect()
-                .to_series()
-                .to_list()
-            )
+    all_common_names = sorted(
+        df_processed.select(pl.col("common_name").drop_nulls().unique())
+        .collect()
+        .to_series()
+        .to_list()
+    )
 
-            all_experiment_type = sorted(
-                df_processed.select(pl.col("experiment_type_split").flatten().drop_nulls().unique())
-                .collect()
-                .to_series()
-                .to_list()
-            )
-        else:
-            all_organisms = view_options['all_organisms']
-            all_common_names = view_options['all_common_names']
-            all_current_status = view_options['all_current_statuses']
-            all_experiment_type = view_options['all_experiment_types']
+    all_current_status = sorted(
+        df_processed.select(pl.col("current_status").drop_nulls().unique())
+        .collect()
+        .to_series()
+        .to_list()
+    )
 
-    except Exception as e:
-        print(f"Error loading filter options from view: {e}")
-        # original logic if view fails
-        df_lazy = DATASETS[project_name]["df_data"].lazy()
+    experiment_type_counts = (
+        df_processed.select(pl.col("experiment_type_split").flatten().drop_nulls())
+        .collect()
+        .to_series()
+        .value_counts()
+        .sort("count", descending=True)
+    )
+    all_experiment_type = experiment_type_counts.get_column("experiment_type_split").to_list()
 
-        if selected_geotags:
-            df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
-
-        df_processed = df_lazy.with_columns([
-            pl.when(pl.col("organism").is_not_null())
-            .then(pl.concat_list([pl.col("organism").cast(pl.Utf8)]))
-            .otherwise(pl.lit([], dtype=pl.List(pl.Utf8)))
-            .alias("organisms_split"),
-
-            pl.when(pl.col("experiment_type").is_not_null())
-            .then(pl.col("experiment_type").cast(pl.Utf8).str.split(", "))
-            .otherwise(pl.lit(None, dtype=pl.List(pl.Utf8)))
-            .alias("experiment_type_split"),
-
-            pl.col("common_name").cast(pl.Utf8),
-            pl.col("current_status").cast(pl.Utf8)
-        ])
-
-        all_organisms = sorted(
-            df_processed.select(pl.col("organisms_split").flatten().drop_nulls().unique())
-            .collect()
-            .to_series()
-            .to_list()
-        )
-
-        all_common_names = sorted(
-            df_processed.select(pl.col("common_name").drop_nulls().unique())
-            .collect()
-            .to_series()
-            .to_list()
-        )
-
-        all_current_status = sorted(
-            df_processed.select(pl.col("current_status").drop_nulls().unique())
-            .collect()
-            .to_series()
-            .to_list()
-        )
-
-        all_experiment_type = sorted(
-            df_processed.select(pl.col("experiment_type_split").flatten().drop_nulls().unique())
-            .collect()
-            .to_series()
-            .to_list()
-        )
 
     all_values = {
         "all_organisms": all_organisms,
@@ -1025,7 +934,13 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
     organism_options.sort(key=lambda x: (x["value"] not in (selected_organisms or []), x["label"].lower()))
     common_name_options.sort(key=lambda x: (x["value"] not in (selected_common_names or []), x["label"].lower()))
     current_status_options.sort(key=lambda x: (x["value"] not in (selected_current_status or []), x["label"].lower()))
-    experiment_type_options.sort(key=lambda x: (x["value"] not in (selected_experiment_type or []), x["label"].lower()))
+
+    # experiment types - preserve the count-based order while prioritising selected items
+    selected_exp_types = selected_experiment_type or []
+    experiment_type_options.sort(key=lambda x: (x["value"] not in selected_exp_types,
+                                                all_values['all_experiment_type'].index(x["value"]) if x["value"] in
+                                                                                                       all_values[
+                                                                                                           'all_experiment_type'] else 999))
 
     return current_status_options, common_name_options, organism_options, experiment_type_options
 
@@ -1086,6 +1001,17 @@ def build_map(
 
     min_size, max_size = 3, 50
 
+    # check if any filters are active
+    any_filter_active = any([
+        selected_organisms,
+        selected_common_names,
+        selected_current_status,
+        selected_experiment_types,
+        selected_geotags
+    ])
+
+    zoom_level = 3 if any_filter_active else 1
+
     if total_rows > 0:
         if max_count > min_count:
             processed_df = df_lazy.with_columns([
@@ -1113,7 +1039,7 @@ def build_map(
             lon="lon",
             color="Kingdom",
             size="scaled_size",
-            zoom=3,
+            zoom=zoom_level,
             hover_name="geotag",
             hover_data={
                 "lat": False,
@@ -1128,7 +1054,7 @@ def build_map(
         fig = px.scatter_map(
             lat=[],
             lon=[],
-            zoom=3,
+            zoom=zoom_level,
             height=800
         )
 
