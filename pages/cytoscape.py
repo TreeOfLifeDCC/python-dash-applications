@@ -4,11 +4,13 @@ from dash import dcc, html, Output, Input, State, dash_table, callback_context, 
 from dash.exceptions import PreventUpdate
 import dash_cytoscape as cyto
 from dash_extensions import EventListener
-import pandas as pd
-from google.cloud import storage
 import io
 import dash_bootstrap_components as dbc
 from urllib.parse import quote, parse_qs
+import polars as pl
+import json
+from google.cloud import bigquery
+from google.oauth2 import service_account
 
 dash.register_page(__name__, path="/cytoscape", name="Cytoscape Tree")
 
@@ -27,13 +29,21 @@ PORTAL_URL_PREFIX = {
 }
 
 DATASETS = {}
-PROJECT_PARQUET_MAP = {
-    "dtol": "python_dash_data_bucket/metadata_dtol*.parquet",
-    "erga": "python_dash_data_bucket/metadata_erga*.parquet",
-    "asg": "python_dash_data_bucket/metadata_asg*.parquet",
-    "gbdp": "python_dash_data_bucket/metadata_gbdp*.parquet"
+
+
+# BigQuery table mapping for each project
+PROJECT_BIGQUERY_MAP = {
+    "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
+    "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
+    "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
+    "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
 }
 
+
+
+client = bigquery.Client(
+    project="prj-ext-prod-biodiv-data-in"
+)
 RANKS = ["kingdom", "phylum", "class", "order", "family", "genus", "species"]
 
 
@@ -149,50 +159,80 @@ def get_subtree_nodes(node_id, elements):
     return subtree_ids
 
 
-def load_data(project_name):
-    if project_name not in DATASETS:
-        gcs_pattern = PROJECT_PARQUET_MAP[project_name]
-        bucket, rest = gcs_pattern.split("/", 1)
-        prefix = rest.replace("*", "")
-        client = storage.Client.create_anonymous_client()
-        blobs = client.list_blobs(bucket, prefix=prefix)
+def load_data_polars(project_name):
+    if project_name in DATASETS:
+        return DATASETS[project_name]
 
-        pieces = []
-        for blob in blobs:
-            if not blob.name.endswith(".parquet"):
-                continue
-            data = blob.download_as_bytes()
-            df_chunk = pd.read_parquet(
-                io.BytesIO(data),
-                engine="pyarrow",
-                columns=[
-                    "scientific_name",
-                    "common_name",
-                    "current_status",
-                    "symbionts_status",
-                    "phylogenetic_tree",
-                    "tax_id",
-                ]
-            )
-            pieces.append(df_chunk)
+    # Get the BigQuery table name for the project
+    table_name = PROJECT_BIGQUERY_MAP[project_name]
 
-        if not pieces:
-            raise FileNotFoundError(f"No parquet files in gs://{bucket}/{rest}")
-        df = pd.concat(pieces, ignore_index=True)
+    # SQL query to select the required columns
+    query = f"""
+    SELECT
+        scientific_name,
+        common_name,
+        current_status,
+        symbionts_status,
+        phylogenetic_tree,
+        tax_id
+    FROM
+        `{table_name}`
+    """
 
-        def extract_names(tree, field):
-            return [tree.get(rank, {}).get(field, "Not Specified") for rank in RANKS]
 
-        df["phylogenetic_tree_scientific_names"] = df["phylogenetic_tree"].apply(lambda t: extract_names(t, "scientific_name"))
-        df["phylogenetic_tree_common_names"] = df["phylogenetic_tree"].apply(lambda t: extract_names(t, "common_name"))
-        DATASETS[project_name] = df
+    job_config = bigquery.QueryJobConfig(
+        use_query_cache=True,
+        use_legacy_sql=False,
+        maximum_bytes_billed=10 ** 12
+    )
 
+    # Execute the query
+    query_job = client.query(query, job_config=job_config)
+
+    # Convert the results to a pandas DataFrame
+    pandas_df = query_job.to_dataframe(create_bqstorage_client=True)
+
+    # Convert pandas DataFrame to polars DataFrame
+    df = pl.from_pandas(pandas_df)
+
+    # Process the phylogenetic_tree column if it's a string
+    if df["phylogenetic_tree"].dtype == pl.Utf8:
+        df = df.with_columns(
+            pl.col("phylogenetic_tree")
+            .apply(json.loads)
+            .alias("phylogenetic_tree")
+        )
+
+    # Extract taxonomic ranks
+    for rank in RANKS:
+        df = df.with_columns([
+            pl.col("phylogenetic_tree")
+              .map_elements(lambda d: d.get(rank, {}).get("scientific_name", "Not Specified"),
+                            return_dtype=pl.Utf8)
+              .alias(f"{rank}_sci"),
+            pl.col("phylogenetic_tree")
+              .map_elements(lambda d: d.get(rank, {}).get("common_name", "Not Specified"),
+                            return_dtype=pl.Utf8)
+              .alias(f"{rank}_com"),
+        ])
+
+    # Create concatenated lists for scientific and common names
+    df = df.with_columns([
+        pl.concat_list([pl.col(f"{r}_sci") for r in RANKS])
+        .alias("phylogenetic_tree_scientific_names"),
+
+        pl.concat_list([pl.col(f"{r}_com") for r in RANKS])
+        .alias("phylogenetic_tree_common_names"),
+    ])
+
+    # Cache the result
+    DATASETS[project_name] = df
     return DATASETS[project_name]
 
 
 def init_project(project_name):
-    df = load_data(project_name)
-    records = df.to_dict(orient="records")
+    df = load_data_polars(project_name)
+    records = df.to_dicts()
 
     all_sci = sorted({
         name
@@ -552,7 +592,7 @@ def update_project_from_url(search_string):
         return "dtol"
     parsed = parse_qs(search_string.lstrip("?"))
     project_name = parsed.get("projectName", ["dtol"])[0]
-    if project_name not in PROJECT_PARQUET_MAP:
+    if project_name not in PROJECT_BIGQUERY_MAP:
         return "dtol"
     return project_name
 
@@ -626,8 +666,8 @@ def master(
 
     records_df = DATASETS.get(project_name)
     if records_df is None:
-        records_df = load_data(project_name)
-    records = records_df.to_dict(orient="records")
+        records_df = load_data_polars(project_name)
+    records = records_df.to_dicts()
     tree_data = full_tree_data
 
     sci_sel = [s for s in (sci_sel or []) if s != "Not Specified"]
