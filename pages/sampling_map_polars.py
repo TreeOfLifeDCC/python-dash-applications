@@ -974,6 +974,9 @@ def build_map(
         ("experiment_types", selected_experiment_types),
     ]
 
+    # Check if any filters are applied
+    has_filters = any(values for _, values in filter_configs) or selected_geotags
+
     for field, values in filter_configs:
         if values:
             df_lazy = df_lazy.filter(
@@ -1001,7 +1004,8 @@ def build_map(
 
     min_size, max_size = 3, 50
 
-    map_settings = {
+    # Default map settings for each project (used when no filters are applied)
+    default_map_settings = {
         "erga": {
             "center": {"lat": 47.0, "lon": 10.0},  # europe
             "zoom": 4
@@ -1011,17 +1015,17 @@ def build_map(
             "zoom": 5
         },
         "asg": {
-            "center": {"lat": 20.0, "lon": 0.0},   # world
+            "center": {"lat": 20.0, "lon": 0.0},  # world
             "zoom": 1
         },
         "gbdp": {
-            "center": {"lat": 20.0, "lon": 0.0},   # world
+            "center": {"lat": 20.0, "lon": 0.0},  # world
             "zoom": 1
         }
     }
 
     # get project map setting (if no project found, default to world view)
-    current_settings = map_settings.get(project_name, {
+    default_settings = default_map_settings.get(project_name, {
         "center": {"lat": 20.0, "lon": 0.0},
         "zoom": 1
     })
@@ -1046,6 +1050,36 @@ def build_map(
         # convert to pandas
         pdf = df_final.to_pandas()
 
+        # Determine map center and zoom based on whether filters are applied
+        if has_filters and len(pdf) > 0:
+            # Calculate bounding box for filtered data
+            lat_min, lat_max = pdf['lat'].min(), pdf['lat'].max()
+            lon_min, lon_max = pdf['lon'].min(), pdf['lon'].max()
+
+            # Calculate center
+            center_lat = (lat_min + lat_max) / 2
+            center_lon = (lon_min + lon_max) / 2
+
+            # Calculate zoom level based on the spread of points
+            lat_range = lat_max - lat_min
+            lon_range = lon_max - lon_min
+
+            # Determine zoom level based on the maximum range
+            max_range = max(lat_range, lon_range)
+
+            if max_range < 80:
+                zoom_level = 2
+            else:
+                zoom_level = 1
+
+            # Use calculated center and zoom
+            map_center = {"lat": center_lat, "lon": center_lon}
+            map_zoom = zoom_level
+        else:
+            # No filters applied, use default settings
+            map_center = default_settings["center"]
+            map_zoom = default_settings["zoom"]
+
         # build map figure
         fig = px.scatter_map(
             pdf,
@@ -1053,7 +1087,7 @@ def build_map(
             lon="lon",
             color="Kingdom",
             size="scaled_size",
-            zoom=current_settings["zoom"],
+            zoom=map_zoom,
             hover_name="geotag",
             hover_data={
                 "lat": False,
@@ -1063,15 +1097,16 @@ def build_map(
                 "record_count": True
             },
             height=800,
-            center=current_settings["center"]
+            center=map_center
         )
     else:
+        # No data to display - use default settings
         fig = px.scatter_map(
             lat=[],
             lon=[],
-            zoom=current_settings["zoom"],
+            zoom=default_settings["zoom"],
             height=800,
-            center=current_settings["center"]
+            center=default_settings["center"]
         )
 
     fig.update_layout(
@@ -1088,7 +1123,6 @@ def build_map(
     )
 
     return fig
-
 
 @callback(
     Output("map-click-flag", "data"),
