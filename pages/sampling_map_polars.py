@@ -1001,16 +1001,30 @@ def build_map(
 
     min_size, max_size = 3, 50
 
-    # check if any filters are active
-    any_filter_active = any([
-        selected_organisms,
-        selected_common_names,
-        selected_current_status,
-        selected_experiment_types,
-        selected_geotags
-    ])
+    map_settings = {
+        "erga": {
+            "center": {"lat": 47.0, "lon": 10.0},  # europe
+            "zoom": 4
+        },
+        "dtol": {
+            "center": {"lat": 54.5, "lon": -2.8},  # uk and ireland
+            "zoom": 5
+        },
+        "asg": {
+            "center": {"lat": 20.0, "lon": 0.0},   # world
+            "zoom": 1
+        },
+        "gbdp": {
+            "center": {"lat": 20.0, "lon": 0.0},   # world
+            "zoom": 1
+        }
+    }
 
-    zoom_level = 3 if any_filter_active else 1
+    # get project map setting (if no project found, default to world view)
+    current_settings = map_settings.get(project_name, {
+        "center": {"lat": 20.0, "lon": 0.0},
+        "zoom": 1
+    })
 
     if total_rows > 0:
         if max_count > min_count:
@@ -1039,7 +1053,7 @@ def build_map(
             lon="lon",
             color="Kingdom",
             size="scaled_size",
-            zoom=zoom_level,
+            zoom=current_settings["zoom"],
             hover_name="geotag",
             hover_data={
                 "lat": False,
@@ -1048,14 +1062,16 @@ def build_map(
                 "Kingdom": True,
                 "record_count": True
             },
-            height=800
+            height=800,
+            center=current_settings["center"]
         )
     else:
         fig = px.scatter_map(
             lat=[],
             lon=[],
-            zoom=zoom_level,
-            height=800
+            zoom=current_settings["zoom"],
+            height=800,
+            center=current_settings["center"]
         )
 
     fig.update_layout(
