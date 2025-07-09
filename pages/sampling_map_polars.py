@@ -974,7 +974,7 @@ def build_map(
         ("experiment_types", selected_experiment_types),
     ]
 
-    # Check if any filters are applied
+    # Check if filters are applied
     has_filters = any(values for _, values in filter_configs) or selected_geotags
 
     for field, values in filter_configs:
@@ -1004,7 +1004,6 @@ def build_map(
 
     min_size, max_size = 3, 50
 
-    # Default map settings for each project (used when no filters are applied)
     default_map_settings = {
         "erga": {
             "center": {"lat": 47.0, "lon": 10.0},  # europe
@@ -1050,21 +1049,20 @@ def build_map(
         # convert to pandas
         pdf = df_final.to_pandas()
 
-        # Determine map center and zoom based on whether filters are applied
+
         if has_filters and len(pdf) > 0:
-            # Calculate bounding box for filtered data
+            # bounding box for filtered data
             lat_min, lat_max = pdf['lat'].min(), pdf['lat'].max()
             lon_min, lon_max = pdf['lon'].min(), pdf['lon'].max()
 
-            # Calculate center
+            # center
             center_lat = (lat_min + lat_max) / 2
             center_lon = (lon_min + lon_max) / 2
 
-            # Calculate zoom level based on the spread of points
+            # zoom level
             lat_range = lat_max - lat_min
             lon_range = lon_max - lon_min
 
-            # Determine zoom level based on the maximum range
             max_range = max(lat_range, lon_range)
 
             if max_range < 80:
@@ -1072,11 +1070,9 @@ def build_map(
             else:
                 zoom_level = 1
 
-            # Use calculated center and zoom
             map_center = {"lat": center_lat, "lon": center_lon}
             map_zoom = zoom_level
         else:
-            # No filters applied, use default settings
             map_center = default_settings["center"]
             map_zoom = default_settings["zoom"]
 
@@ -1100,7 +1096,6 @@ def build_map(
             center=map_center
         )
     else:
-        # No data to display - use default settings
         fig = px.scatter_map(
             lat=[],
             lon=[],
