@@ -648,16 +648,6 @@ def layout(**kwargs):
         # table section
         dbc.Row([
             dbc.Col([
-                # organism count header
-                dcc.Loading(
-                    id="loading-organism-count",
-                    type="circle",
-                    color="#0d6efd",
-                    children=html.Div(
-                        id="organism-count-header",
-                        className="text-center mb-2 fs-6 fw-bold text-dark"
-                    )
-                ),
                 # data table
                 dcc.Loading(
                     id="loading-dashboard-datatable",
@@ -776,16 +766,6 @@ def layout(**kwargs):
         # table section
         dbc.Row([
             dbc.Col([
-                # organism count header
-                dcc.Loading(
-                    id="tab2-loading-organism-count",
-                    type="circle",
-                    color="#0d6efd",
-                    children=html.Div(
-                        id="tab2-organism-count-header",
-                        className="text-center mb-2 fs-6 fw-bold text-dark"
-                    )
-                ),
                 # data table
                 dcc.Loading(
                     id="tab2-loading-dashboard-datatable",
@@ -945,7 +925,6 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
     Output("dashboard-datatable-paging", "data"),
     Output("dashboard-datatable-paging", "page_count"),
     Output("dashboard-datatable-paging", "page_current"),
-    Output("organism-count-header", "children"),  # Add this output
     Input('dashboard-datatable-paging', "page_current"),
     Input('dashboard-datatable-paging', "page_size"),
     Input("project-store", "data"),
@@ -980,13 +959,11 @@ def build_metadata_table(page_current: int, page_size: int, project_name: str, s
     else:
         filter_text = "in total"
 
-    count_header = f"{total_count:,} organisms found {filter_text}"
 
     return (
         table_data.to_dict('records'),
         total_pages,
-        page_current,
-        count_header
+        page_current
     )
 
 # ** TAB 2 **#
@@ -1263,7 +1240,6 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
     Output("tab2-dashboard-datatable-paging", "data"),
     Output("tab2-dashboard-datatable-paging", "page_count"),
     Output("tab2-dashboard-datatable-paging", "page_current"),
-    Output("tab2-organism-count-header", "children"),  # Add this output
 
     Input("tab2-dashboard-datatable-paging", "page_current"),
     Input("tab2-dashboard-datatable-paging", "page_size"),
@@ -1307,11 +1283,9 @@ def build_rawdata_table(page_current: int, page_size: int, project_name: str,
     else:
         filter_text = "in total"
 
-    count_header = f"{total_count:,} organisms found {filter_text}"
 
     return (
         table_data.to_dict('records'),
         total_pages,
-        page_current,
-        count_header
+        page_current
     )
