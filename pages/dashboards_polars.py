@@ -101,6 +101,7 @@ def build_table_data_query(project_name: str, tab: str, filters: dict, offset: i
     return f"""
     SELECT DISTINCT
         organism,
+        tax_id,
         common_name,
         current_status,
         symbionts_status
