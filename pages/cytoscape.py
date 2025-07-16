@@ -37,7 +37,8 @@ VIEW_MAPPINGS = {
         "erga": "prj-ext-prod-biodiv-data-in.erga.phylogeny_tree_metadata_aggregated",
         "asg": "prj-ext-prod-biodiv-data-in.asg.phylogeny_tree_metadata_aggregated",
         "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.phylogeny_tree_metadata_aggregated"
-        }
+
+}
 
 
 client = bigquery.Client(
@@ -55,14 +56,15 @@ def make_link(text: str, project_name: str, target: str) -> str:
     return f"[{text}]({full_url})"
 
 
-def build_taxonomy_tree(flat_records, ranks_order, max_depth=None):
+def build_taxonomy_tree(flat_records, ranks_order, max_depth=None, target_node=None):
     """
-    Build a taxonomy tree from flat records with optional depth limit.
+    Build a taxonomy tree from flat records with an option to limit the depth.
 
     Args:
         flat_records: List of record dictionaries
         ranks_order: List of taxonomic ranks in order
         max_depth: Maximum depth to build the tree (None for full tree)
+        target_node: If specified, only expand this node and its children
 
     Returns:
         Root node of the tree
@@ -84,12 +86,32 @@ def build_taxonomy_tree(flat_records, ranks_order, max_depth=None):
             sci_leaf if sci_leaf and sci_leaf.lower() != "not specified" else "Not Specified"
         )
 
-        # Apply depth limit if specified
-        if max_depth is not None:
-            branch = branch[:max_depth + 1]  # +1 because we start from root
+        # Check if we're targeting a specific node
+        target_index = -1
+        if target_node is not None:
+            try:
+                target_index = branch.index(target_node)
+            except ValueError:
+                # Target node not in this branch, skip to next record
+                continue
+
+        # Only process up to max_depth if specified and not targeting a specific node
+        if max_depth is not None and target_node is None:
+            branch = branch[:max_depth + 1]  # +1 for root level
+
+        # If targeting a specific node, ensure we process at least up to that node plus one level
+        if target_index >= 0:
+            # We want to process the target node and its immediate children
+            min_depth = target_index + 1
+            if max_depth is not None:
+                max_depth = max(max_depth, min_depth)
 
         current = root
-        for name in branch:
+        for i, name in enumerate(branch):
+            # Stop if we've reached max_depth and not targeting this specific node
+            if max_depth is not None and i > max_depth and (target_node is None or i != target_index + 1):
+                break
+
             for child in current["children"]:
                 if child["name"] == name:
                     current = child
@@ -99,9 +121,7 @@ def build_taxonomy_tree(flat_records, ranks_order, max_depth=None):
                     "id": str(uuid.uuid4()),
                     "name": name,
                     "parent": current["id"],
-                    "children": [],
-                    "has_unexpanded_children": max_depth is not None and branch.index(name) == len(branch) - 1
-                                              and branch.index(name) < len(ranks_order)
+                    "children": []
                 }
                 current["children"].append(new_node)
                 current = new_node
@@ -117,120 +137,11 @@ def build_node_dict(node, node_dict=None):
     return node_dict
 
 
-def expand_node(tree, node_id, records, ranks_order):
-    """
-    Expand a specific node in the tree by loading its children.
-
-    Args:
-        tree: The current tree structure
-        node_id: ID of the node to expand
-        records: Original records to use for building the subtree
-        ranks_order: List of taxonomic ranks in order
-
-    Returns:
-        Updated tree with the specified node expanded
-    """
-    # Build a dictionary of nodes for easy access
-    node_dict = build_node_dict(tree)
-
-    # Find the node to expand
-    node_to_expand = node_dict.get(node_id)
-    if not node_to_expand or not node_to_expand.get("has_unexpanded_children", False):
-        return tree  # Node not found or already fully expanded
-
-    # Determine the current depth of the node
-    depth = 0
-    current = node_to_expand
-    while current.get("parent"):
-        depth += 1
-        current = node_dict.get(current["parent"])
-
-    # Filter records that belong to this branch
-    branch_path = []
-    current = node_to_expand
-    while current:
-        branch_path.insert(0, current["name"])
-        current = node_dict.get(current.get("parent"))
-
-    # Remove "Eukaryota" from the path if it exists
-    if branch_path and branch_path[0] == "Eukaryota":
-        branch_path = branch_path[1:]
-
-    # Filter records that match this branch
-    filtered_records = []
-    for rec in records:
-        matches = True
-        tree_data = rec.get("phylogenetic_tree", {})
-
-        for i, name in enumerate(branch_path):
-            if ":" in name:  # It's a taxonomic rank
-                rank, value = name.split(": ", 1)
-                if rank.lower() in tree_data:
-                    node_data = tree_data[rank.lower()]
-                    if node_data.get("scientific_name", "") != value and value != "Not Specified":
-                        matches = False
-                        break
-            elif i == len(branch_path) - 1:  # It's the leaf node (species)
-                if rec.get("scientific_name", "") != name and name != "Not Specified":
-                    matches = False
-
-        if matches:
-            filtered_records.append(rec)
-
-    # Build a subtree for this node with one more level of depth
-    subtree = build_taxonomy_tree(filtered_records, ranks_order, max_depth=depth + 1)
-
-    # Replace the node's children with the new subtree's children
-    if subtree.get("children"):
-        # Find the corresponding node in the subtree
-        current_path = branch_path.copy()
-        current_subtree = subtree
-
-        while current_path and current_subtree.get("children"):
-            name_to_find = current_path[0]
-            for child in current_subtree["children"]:
-                if child["name"] == name_to_find:
-                    current_subtree = child
-                    current_path = current_path[1:]
-                    break
-            else:
-                break
-
-        # If we found the node, update its children
-        if not current_path:
-            node_to_expand["children"] = current_subtree.get("children", [])
-            # Update parent references
-            for child in node_to_expand["children"]:
-                child["parent"] = node_to_expand["id"]
-
-            # Mark as expanded if all children are fully expanded
-            node_to_expand["has_unexpanded_children"] = False
-
-            # Check if any children need to be marked as unexpanded
-            for child in node_to_expand["children"]:
-                if depth + 1 < len(ranks_order):
-                    child["has_unexpanded_children"] = True
-
-    return tree
-
-
 def make_full_elements(tree):
     nodes, edges = [], []
 
     def dfs(node):
-        node_class = "node"
-        if node.get("has_unexpanded_children", False):
-            node_class = "node unexpanded"
-
-        nodes.append({
-            "data": {
-                "id": node["id"],
-                "label": node["name"],
-                "has_unexpanded_children": node.get("has_unexpanded_children", False)
-            },
-            "classes": node_class
-        })
-
+        nodes.append({"data": {"id": node["id"], "label": node["name"]}, "classes": "node"})
         for child_node in node.get("children", []):
             edges.append({"data": {"source": node["id"], "target": child_node["id"]}, "classes": "edge"})
             dfs(child_node)
@@ -256,19 +167,7 @@ def tree_to_table_rows(node, path=None):
 
 
 def tree_to_elements(node, expanded):
-    node_class = "node"
-    if node.get("has_unexpanded_children", False):
-        node_class = "node unexpanded"
-
-    elems = [{
-        "data": {
-            "id": node["id"],
-            "label": node["name"],
-            "has_unexpanded_children": node.get("has_unexpanded_children", False)
-        },
-        "classes": node_class
-    }]
-
+    elems = [{"data": {"id": node["id"], "label": node["name"]}, "classes": "node"}]
     if node["id"] in expanded:
         for child_node in node.get("children", []):
             elems.append(
@@ -301,14 +200,20 @@ def load_data_polars(project_name):
     if project_name in DATASETS:
         return DATASETS[project_name]
 
-    # Get the BigQuery view name for the project
+    # Get the BigQuery table name for the project
     view_name = VIEW_MAPPINGS[project_name]
 
     # SQL query to select the required columns
     query = f"""
     SELECT
-        *
-    FROM `{view_name}`
+        scientific_name,
+        common_name,
+        current_status,
+        symbionts_status,
+        phylogenetic_tree,
+        tax_id
+    FROM
+        `{view_name}`
     """
 
 
@@ -362,7 +267,7 @@ def load_data_polars(project_name):
     return DATASETS[project_name]
 
 
-def init_project(project_name, initial_depth=2):
+def init_project(project_name):
     df = load_data_polars(project_name)
     records = df.to_dicts()
 
@@ -381,21 +286,26 @@ def init_project(project_name, initial_depth=2):
     sci_options = [{"label": name, "value": name} for name in all_sci]
     com_options = [{"label": name, "value": name} for name in all_com]
 
-    # Build tree with limited depth for initial load
-    tree = build_taxonomy_tree(records, RANKS, max_depth=initial_depth)
-    full_tree_dict = tree
+    # Build a partial tree initially (just 1 level deep) for faster loading
+    tree = build_taxonomy_tree(records, RANKS, max_depth=1)
+    full_tree_dict = tree  # Store the partial tree initially
     initial_expanded = [tree["id"]]
 
-    # Store the original records for later use when expanding nodes
-    if "original_records" not in DATASETS:
-        DATASETS["original_records"] = records
-
-    all_rows = tree_to_table_rows(tree)
+    # Load all data into the table while keeping the tree partial
     rows_for_table = []
-    for row in all_rows:
-        sci = row["Scientific name"]
-        if ":" not in sci and sci not in ("Not Specified", "Eukaryota"):
-            rec = next((r for r in records if r.get("scientific_name") == sci), {})
+    for rec in records:
+        sci = rec.get("scientific_name", "")
+        if sci and sci not in ("Not Specified", "Eukaryota"):
+            # Create phylogeny path for this record
+            phylogeny_path = ["Eukaryota"]
+            for rank in RANKS:
+                rank_sci = rec.get("phylogenetic_tree", {}).get(rank, {}).get("scientific_name", "")
+                if rank_sci and rank_sci.lower() != "not specified":
+                    phylogeny_path.append(f"{rank}: {rank_sci}")
+            if sci and sci.lower() != "not specified":
+                phylogeny_path.append(sci)
+
+            # Create table row
             link_target = rec.get("tax_id", sci) if project_name in ("erga", "gbdp") else sci
             md_link = make_link(sci, project_name, link_target)
             rows_for_table.append({
@@ -403,10 +313,11 @@ def init_project(project_name, initial_depth=2):
                 "Common name": rec.get("common_name", ""),
                 "Current Status": rec.get("current_status", ""),
                 "Symbionts Status": rec.get("symbionts_status", ""),
-                "Phylogeny": row["Phylogeny"],
-                "node_id": row["node_id"]
+                "Phylogeny": " → ".join(phylogeny_path),
+                "node_id": ""  # No direct node ID since it might not be in the partial tree
             })
 
+    # Only load the root node and its immediate children for the tree visualization
     elements = tree_to_elements(tree, initial_expanded)
 
     color = HEADER_COLOURS.get(project_name, "#cccccc")
@@ -421,14 +332,6 @@ def init_project(project_name, initial_depth=2):
                 "font-size": "14px",
                 "text-valign": "center",
                 "text-halign": "center"
-            }
-        },
-        {
-            "selector": "node.unexpanded",
-            "style": {
-                "border-width": 3,
-                "border-color": "#FF5733",
-                "border-style": "dashed"
             }
         },
         {
@@ -799,7 +702,7 @@ def master(
     triggered = {t["prop_id"] for t in callback_context.triggered}
 
     if "project-store.data" in triggered or "reset-all.n_clicks" in triggered:
-        return init_project(project_name, initial_depth=2)
+        return init_project(project_name)
 
     if "clear-sci.n_clicks" in triggered or "clear-common.n_clicks" in triggered:
         if "clear-sci.n_clicks" in triggered:
@@ -807,7 +710,7 @@ def master(
         if "clear-common.n_clicks" in triggered:
             common_sel = []
         if not sci_sel and not common_sel:
-            return init_project(project_name, initial_depth=2)
+            return init_project(project_name)
 
     records_df = DATASETS.get(project_name)
     if records_df is None:
@@ -886,40 +789,48 @@ def master(
         nd = build_node_dict(tree_data, {})
         nid = tap_node["id"]
 
-        # Check if this node has unexpanded children
+        # Check if this node is at the maximum depth and has no children loaded yet
         node = nd.get(nid, {})
-        has_unexpanded = node.get("has_unexpanded_children", False)
+        if not node.get("children") and node.get("name") != "Not Specified":
+            # This node might be at the maximum depth, try to expand it
+            # Find the corresponding record in the original data
+            node_name = node.get("name", "")
 
-        if has_unexpanded:
-            # Expand this node by loading its children
-            original_records = DATASETS.get("original_records", [])
-            updated_tree = expand_node(tree_data, nid, original_records, RANKS)
+            # If this is a leaf node (scientific name without rank prefix)
+            if ":" not in node_name and node_name not in ("Eukaryota", "Not Specified"):
+                # Find the record for this scientific name
+                matching_record = next((r for r in records if r.get("scientific_name") == node_name), None)
 
-            # Add this node to expanded nodes if not already there
-            if nid not in expanded_nodes:
-                new_expanded = expanded_nodes + [nid]
-            else:
-                new_expanded = expanded_nodes
+                if matching_record:
+                    # Build a subtree for this record, focusing on expanding this specific node
+                    subtree = build_taxonomy_tree([matching_record], RANKS, target_node=node_name)
 
-            # Generate new elements with the updated tree
-            new_elems = tree_to_elements(updated_tree, new_expanded)
+                    # Find the path to this node in the current tree
+                    path = []
+                    current = node
+                    while current.get("parent"):
+                        parent_id = current.get("parent")
+                        parent = nd.get(parent_id)
+                        if parent:
+                            path.insert(0, parent)
+                            current = parent
+                        else:
+                            break
 
-            return (
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                updated_tree,  # Update the full tree store with the expanded tree
-                no_update,
-                new_expanded,
-                new_elems,
-                no_update,
-                no_update,
-                no_update,
-                no_update
-            )
-        elif nid in expanded_nodes:
-            # Collapse this node
+                    # Find the corresponding node in the subtree
+                    current_subtree = subtree
+                    for p in path:
+                        for child in current_subtree.get("children", []):
+                            if child.get("name") == p.get("name"):
+                                current_subtree = child
+                                break
+
+                    # Add children from the subtree to the current node
+                    node["children"] = current_subtree.get("children", [])
+                    for child in node["children"]:
+                        child["parent"] = node["id"]
+
+        if nid in expanded_nodes:
             to_remove = set()
             def collect(x):
                 for c in nd[x]["children"]:
@@ -927,39 +838,23 @@ def master(
                     collect(c["id"])
             collect(nid)
             new_expanded = [e for e in expanded_nodes if e not in to_remove and e != nid]
-            new_elems = tree_to_elements(tree_data, new_expanded)
-            return (
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                new_expanded,
-                new_elems,
-                no_update,
-                no_update,
-                no_update,
-                no_update
-            )
         else:
-            # Expand this node (it's already fully loaded)
             new_expanded = expanded_nodes + [nid]
-            new_elems = tree_to_elements(tree_data, new_expanded)
-            return (
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                no_update,
-                new_expanded,
-                new_elems,
-                no_update,
-                no_update,
-                no_update,
-                no_update
-            )
+        new_elems = tree_to_elements(tree_data, new_expanded)
+        return (
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            no_update,
+            new_expanded,
+            new_elems,
+            no_update,
+            no_update,
+            no_update,
+            no_update
+        )
 
     ctx = callback_context.triggered[0]
     comp, prop = ctx["prop_id"].split(".")
@@ -1020,7 +915,7 @@ def master(
         )
 
     if not sci_sel and not common_sel:
-        return init_project(project_name, initial_depth=2)
+        return init_project(project_name)
 
     filtered_records = [
         rec for rec in records
@@ -1028,34 +923,33 @@ def master(
            and (not common_sel or any(c in rec["phylogenetic_tree_common_names"] for c in common_sel))
     ]
 
-    new_tree = build_taxonomy_tree(filtered_records, RANKS)
-    new_rows = tree_to_table_rows(new_tree)
-    nd_new = build_node_dict(new_tree, {})
-    exp_ids = [new_tree["id"]]
-    for rec in filtered_records:
-        leaf_name = rec["scientific_name"]
-        for row in new_rows:
-            if row["Scientific name"] == leaf_name:
-                cur = row["node_id"]
-                while cur:
-                    exp_ids.append(cur)
-                    cur = nd_new[cur].get("parent")
-                break
-    new_elems = tree_to_elements(new_tree, exp_ids)
+    # Build a partial tree for filtered results too
+    new_tree = build_taxonomy_tree(filtered_records, RANKS, max_depth=1)
+    new_elems = tree_to_elements(new_tree, [new_tree["id"]])
 
+    # Create table rows directly from filtered records
     visible = []
-    for row in new_rows:
-        if row["node_id"] in exp_ids and not nd_new[row["node_id"]]["children"]:
-            sci_plain = row["Scientific name"]
-            rec = next((x for x in filtered_records if x["scientific_name"] == sci_plain), {})
-            link_target = rec.get("tax_id", sci_plain) if project_name in ("erga", "gbdp") else sci_plain
-            md_link = make_link(sci_plain, project_name, link_target)
+    for rec in filtered_records:
+        sci = rec.get("scientific_name", "")
+        if sci and sci not in ("Not Specified", "Eukaryota"):
+            # Create phylogeny path for this record
+            phylogeny_path = ["Eukaryota"]
+            for rank in RANKS:
+                rank_sci = rec.get("phylogenetic_tree", {}).get(rank, {}).get("scientific_name", "")
+                if rank_sci and rank_sci.lower() != "not specified":
+                    phylogeny_path.append(f"{rank}: {rank_sci}")
+            if sci and sci.lower() != "not specified":
+                phylogeny_path.append(sci)
+
+            # Create table row
+            link_target = rec.get("tax_id", sci) if project_name in ("erga", "gbdp") else sci
+            md_link = make_link(sci, project_name, link_target)
             visible.append({
                 "Scientific name": md_link,
                 "Common name": rec.get("common_name", ""),
                 "Current Status": rec.get("current_status", ""),
                 "Symbionts Status": rec.get("symbionts_status", ""),
-                "Phylogeny": row["Phylogeny"]
+                "Phylogeny": " → ".join(phylogeny_path)
             })
 
     allowed_sci = {
@@ -1081,7 +975,7 @@ def master(
         sci_sel,
         new_tree,
         visible,
-        exp_ids,
+        [new_tree["id"]],  # Only root node is expanded initially
         new_elems,
         no_update,
         no_update,
