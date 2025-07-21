@@ -286,12 +286,12 @@ def init_project(project_name):
     sci_options = [{"label": name, "value": name} for name in all_sci]
     com_options = [{"label": name, "value": name} for name in all_com]
 
-    # Build a partial tree initially (just 1 level deep) for faster loading
-    tree = build_taxonomy_tree(records, RANKS, max_depth=1)
-    full_tree_dict = tree  # Store the partial tree initially
+    # Build the full tree
+    tree = build_taxonomy_tree(records, RANKS)
+    full_tree_dict = tree  # Store the full tree
     initial_expanded = [tree["id"]]
 
-    # Load all data into the table while keeping the tree partial
+    # Load all data into the table
     rows_for_table = []
     for rec in records:
         sci = rec.get("scientific_name", "")
@@ -924,7 +924,7 @@ def master(
     ]
 
     # Build a partial tree for filtered results too
-    new_tree = build_taxonomy_tree(filtered_records, RANKS, max_depth=1)
+    new_tree = build_taxonomy_tree(filtered_records, RANKS)
     new_elems = tree_to_elements(new_tree, [new_tree["id"]])
 
     # Create table rows directly from filtered records
