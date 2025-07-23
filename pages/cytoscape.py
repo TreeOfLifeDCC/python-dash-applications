@@ -31,14 +31,14 @@ PORTAL_URL_PREFIX = {
 DATASETS = {}
 
 
-# BigQuery table mapping for each project
-PROJECT_BIGQUERY_MAP = {
-    "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
-    "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
-    "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
-    "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
-}
+# BigQuery view mapping for each project
+VIEW_MAPPINGS = {
+        "dtol": "prj-ext-prod-biodiv-data-in.dtol.phylogeny_tree_metadata_aggregated",
+        "erga": "prj-ext-prod-biodiv-data-in.erga.phylogeny_tree_metadata_aggregated",
+        "asg": "prj-ext-prod-biodiv-data-in.asg.phylogeny_tree_metadata_aggregated",
+        "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.phylogeny_tree_metadata_aggregated"
 
+}
 
 
 client = bigquery.Client(
@@ -56,7 +56,19 @@ def make_link(text: str, project_name: str, target: str) -> str:
     return f"[{text}]({full_url})"
 
 
-def build_taxonomy_tree(flat_records, ranks_order):
+def build_taxonomy_tree(flat_records, ranks_order, max_depth=None, target_node=None):
+    """
+    Build a taxonomy tree from flat records with an option to limit the depth.
+
+    Args:
+        flat_records: List of record dictionaries
+        ranks_order: List of taxonomic ranks in order
+        max_depth: Maximum depth to build the tree (None for full tree)
+        target_node: If specified, only expand this node and its children
+
+    Returns:
+        Root node of the tree
+    """
     root = {"id": str(uuid.uuid4()), "name": "Eukaryota", "parent": None, "children": []}
     for rec in flat_records:
         branch = []
@@ -73,8 +85,33 @@ def build_taxonomy_tree(flat_records, ranks_order):
         branch.append(
             sci_leaf if sci_leaf and sci_leaf.lower() != "not specified" else "Not Specified"
         )
+
+        # Check if we're targeting a specific node
+        target_index = -1
+        if target_node is not None:
+            try:
+                target_index = branch.index(target_node)
+            except ValueError:
+                # Target node not in this branch, skip to next record
+                continue
+
+        # Only process up to max_depth if specified and not targeting a specific node
+        if max_depth is not None and target_node is None:
+            branch = branch[:max_depth + 1]  # +1 for root level
+
+        # If targeting a specific node, ensure we process at least up to that node plus one level
+        if target_index >= 0:
+            # We want to process the target node and its immediate children
+            min_depth = target_index + 1
+            if max_depth is not None:
+                max_depth = max(max_depth, min_depth)
+
         current = root
-        for name in branch:
+        for i, name in enumerate(branch):
+            # Stop if we've reached max_depth and not targeting this specific node
+            if max_depth is not None and i > max_depth and (target_node is None or i != target_index + 1):
+                break
+
             for child in current["children"]:
                 if child["name"] == name:
                     current = child
@@ -164,7 +201,7 @@ def load_data_polars(project_name):
         return DATASETS[project_name]
 
     # Get the BigQuery table name for the project
-    table_name = PROJECT_BIGQUERY_MAP[project_name]
+    view_name = VIEW_MAPPINGS[project_name]
 
     # SQL query to select the required columns
     query = f"""
@@ -176,7 +213,7 @@ def load_data_polars(project_name):
         phylogenetic_tree,
         tax_id
     FROM
-        `{table_name}`
+        `{view_name}`
     """
 
 
@@ -249,16 +286,26 @@ def init_project(project_name):
     sci_options = [{"label": name, "value": name} for name in all_sci]
     com_options = [{"label": name, "value": name} for name in all_com]
 
+    # Build the full tree
     tree = build_taxonomy_tree(records, RANKS)
-    full_tree_dict = tree
+    full_tree_dict = tree  # Store the full tree
     initial_expanded = [tree["id"]]
 
-    all_rows = tree_to_table_rows(tree)
+    # Load all data into the table
     rows_for_table = []
-    for row in all_rows:
-        sci = row["Scientific name"]
-        if ":" not in sci and sci not in ("Not Specified", "Eukaryota"):
-            rec = next((r for r in records if r.get("scientific_name") == sci), {})
+    for rec in records:
+        sci = rec.get("scientific_name", "")
+        if sci and sci not in ("Not Specified", "Eukaryota"):
+            # Create phylogeny path for this record
+            phylogeny_path = ["Eukaryota"]
+            for rank in RANKS:
+                rank_sci = rec.get("phylogenetic_tree", {}).get(rank, {}).get("scientific_name", "")
+                if rank_sci and rank_sci.lower() != "not specified":
+                    phylogeny_path.append(f"{rank}: {rank_sci}")
+            if sci and sci.lower() != "not specified":
+                phylogeny_path.append(sci)
+
+            # Create table row
             link_target = rec.get("tax_id", sci) if project_name in ("erga", "gbdp") else sci
             md_link = make_link(sci, project_name, link_target)
             rows_for_table.append({
@@ -266,10 +313,11 @@ def init_project(project_name):
                 "Common name": rec.get("common_name", ""),
                 "Current Status": rec.get("current_status", ""),
                 "Symbionts Status": rec.get("symbionts_status", ""),
-                "Phylogeny": row["Phylogeny"],
-                "node_id": row["node_id"]
+                "Phylogeny": " → ".join(phylogeny_path),
+                "node_id": ""  # No direct node ID since it might not be in the partial tree
             })
 
+    # Only load the root node and its immediate children for the tree visualization
     elements = tree_to_elements(tree, initial_expanded)
 
     color = HEADER_COLOURS.get(project_name, "#cccccc")
@@ -592,7 +640,7 @@ def update_project_from_url(search_string):
         return "dtol"
     parsed = parse_qs(search_string.lstrip("?"))
     project_name = parsed.get("projectName", ["dtol"])[0]
-    if project_name not in PROJECT_BIGQUERY_MAP:
+    if project_name not in VIEW_MAPPINGS:
         return "dtol"
     return project_name
 
@@ -740,6 +788,48 @@ def master(
     if "cytoscape-tree.tapNodeData" in triggered and tap_node:
         nd = build_node_dict(tree_data, {})
         nid = tap_node["id"]
+
+        # Check if this node is at the maximum depth and has no children loaded yet
+        node = nd.get(nid, {})
+        if not node.get("children") and node.get("name") != "Not Specified":
+            # This node might be at the maximum depth, try to expand it
+            # Find the corresponding record in the original data
+            node_name = node.get("name", "")
+
+            # If this is a leaf node (scientific name without rank prefix)
+            if ":" not in node_name and node_name not in ("Eukaryota", "Not Specified"):
+                # Find the record for this scientific name
+                matching_record = next((r for r in records if r.get("scientific_name") == node_name), None)
+
+                if matching_record:
+                    # Build a subtree for this record, focusing on expanding this specific node
+                    subtree = build_taxonomy_tree([matching_record], RANKS, target_node=node_name)
+
+                    # Find the path to this node in the current tree
+                    path = []
+                    current = node
+                    while current.get("parent"):
+                        parent_id = current.get("parent")
+                        parent = nd.get(parent_id)
+                        if parent:
+                            path.insert(0, parent)
+                            current = parent
+                        else:
+                            break
+
+                    # Find the corresponding node in the subtree
+                    current_subtree = subtree
+                    for p in path:
+                        for child in current_subtree.get("children", []):
+                            if child.get("name") == p.get("name"):
+                                current_subtree = child
+                                break
+
+                    # Add children from the subtree to the current node
+                    node["children"] = current_subtree.get("children", [])
+                    for child in node["children"]:
+                        child["parent"] = node["id"]
+
         if nid in expanded_nodes:
             to_remove = set()
             def collect(x):
@@ -833,34 +923,33 @@ def master(
            and (not common_sel or any(c in rec["phylogenetic_tree_common_names"] for c in common_sel))
     ]
 
+    # Build a partial tree for filtered results too
     new_tree = build_taxonomy_tree(filtered_records, RANKS)
-    new_rows = tree_to_table_rows(new_tree)
-    nd_new = build_node_dict(new_tree, {})
-    exp_ids = [new_tree["id"]]
-    for rec in filtered_records:
-        leaf_name = rec["scientific_name"]
-        for row in new_rows:
-            if row["Scientific name"] == leaf_name:
-                cur = row["node_id"]
-                while cur:
-                    exp_ids.append(cur)
-                    cur = nd_new[cur].get("parent")
-                break
-    new_elems = tree_to_elements(new_tree, exp_ids)
+    new_elems = tree_to_elements(new_tree, [new_tree["id"]])
 
+    # Create table rows directly from filtered records
     visible = []
-    for row in new_rows:
-        if row["node_id"] in exp_ids and not nd_new[row["node_id"]]["children"]:
-            sci_plain = row["Scientific name"]
-            rec = next((x for x in filtered_records if x["scientific_name"] == sci_plain), {})
-            link_target = rec.get("tax_id", sci_plain) if project_name in ("erga", "gbdp") else sci_plain
-            md_link = make_link(sci_plain, project_name, link_target)
+    for rec in filtered_records:
+        sci = rec.get("scientific_name", "")
+        if sci and sci not in ("Not Specified", "Eukaryota"):
+            # Create phylogeny path for this record
+            phylogeny_path = ["Eukaryota"]
+            for rank in RANKS:
+                rank_sci = rec.get("phylogenetic_tree", {}).get(rank, {}).get("scientific_name", "")
+                if rank_sci and rank_sci.lower() != "not specified":
+                    phylogeny_path.append(f"{rank}: {rank_sci}")
+            if sci and sci.lower() != "not specified":
+                phylogeny_path.append(sci)
+
+            # Create table row
+            link_target = rec.get("tax_id", sci) if project_name in ("erga", "gbdp") else sci
+            md_link = make_link(sci, project_name, link_target)
             visible.append({
                 "Scientific name": md_link,
                 "Common name": rec.get("common_name", ""),
                 "Current Status": rec.get("current_status", ""),
                 "Symbionts Status": rec.get("symbionts_status", ""),
-                "Phylogeny": row["Phylogeny"]
+                "Phylogeny": " → ".join(phylogeny_path)
             })
 
     allowed_sci = {
@@ -886,7 +975,7 @@ def master(
         sci_sel,
         new_tree,
         visible,
-        exp_ids,
+        [new_tree["id"]],  # Only root node is expanded initially
         new_elems,
         no_update,
         no_update,
