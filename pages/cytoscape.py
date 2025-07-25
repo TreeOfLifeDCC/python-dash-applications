@@ -33,10 +33,10 @@ DATASETS = {}
 
 # BigQuery view mapping for each project
 VIEW_MAPPINGS = {
-        "dtol": "prj-ext-prod-biodiv-data-in.dtol.phylogeny_tree_metadata_aggregated",
-        "erga": "prj-ext-prod-biodiv-data-in.erga.phylogeny_tree_metadata_aggregated",
-        "asg": "prj-ext-prod-biodiv-data-in.asg.phylogeny_tree_metadata_aggregated",
-        "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.phylogeny_tree_metadata_aggregated"
+        "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
+        "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
+        "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
+        "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
 
 }
 
