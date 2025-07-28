@@ -31,15 +31,14 @@ PORTAL_URL_PREFIX = {
 DATASETS = {}
 
 
-# BigQuery view mapping for each project
-VIEW_MAPPINGS = {
+# BigQuery TABLE mapping for each project
+PROJECT_BIGQUERY_MAP = {
         "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
         "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
         "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
         "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
 
 }
-
 
 client = bigquery.Client(
     project="prj-ext-prod-biodiv-data-in"
@@ -201,7 +200,7 @@ def load_data_polars(project_name):
         return DATASETS[project_name]
 
     # Get the BigQuery table name for the project
-    view_name = VIEW_MAPPINGS[project_name]
+    table_name = PROJECT_BIGQUERY_MAP[project_name]
 
     # SQL query to select the required columns
     query = f"""
@@ -213,7 +212,7 @@ def load_data_polars(project_name):
         phylogenetic_tree,
         tax_id
     FROM
-        `{view_name}`
+        `{table_name}`
     """
 
 
@@ -640,7 +639,7 @@ def update_project_from_url(search_string):
         return "dtol"
     parsed = parse_qs(search_string.lstrip("?"))
     project_name = parsed.get("projectName", ["dtol"])[0]
-    if project_name not in VIEW_MAPPINGS:
+    if project_name not in PROJECT_BIGQUERY_MAP:
         return "dtol"
     return project_name
 
