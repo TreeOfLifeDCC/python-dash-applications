@@ -151,7 +151,7 @@ def build_table_count_query(project_name: str, tab: str, filters: dict) -> str:
     where_clause = " AND ".join(where_conditions)
 
     return f"""
-        SELECT COUNT(DISTINCT tax_id) as total_count  -- Count by tax_id for unique records
+        SELECT COUNT(DISTINCT tax_id) as total_count
         FROM `{view_name}`
         WHERE {where_clause}
         """
