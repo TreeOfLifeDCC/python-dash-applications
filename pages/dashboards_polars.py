@@ -100,7 +100,7 @@ def build_table_data_query(project_name: str, tab: str, filters: dict, offset: i
 
     return f"""
     SELECT DISTINCT
-        organism,
+        scientific_name,
         tax_id,
         common_name,
         current_status,
@@ -151,10 +151,10 @@ def build_table_count_query(project_name: str, tab: str, filters: dict) -> str:
     where_clause = " AND ".join(where_conditions)
 
     return f"""
-    SELECT COUNT(DISTINCT organism) as total_count
-    FROM `{view_name}`
-    WHERE {where_clause}
-    """
+        SELECT COUNT(DISTINCT tax_id) as total_count
+        FROM `{view_name}`
+        WHERE {where_clause}
+        """
 
 
 
@@ -560,16 +560,16 @@ def load_table_data(project_name: str, filters: dict, page_current: int, page_si
         url_param = "tax_id" if project_name in ["erga", "gbdp"] else "organism"
 
         def create_organism_link(row):
-            organism = row.get('organism', '')
-            if not organism:
+            scientific_name = row.get('scientific_name', '')
+            if not scientific_name:
                 return ''
 
             if url_param == 'tax_id':
                 url_value = str(row.get('tax_id', ''))
             else:
-                url_value = urllib.parse.quote(organism, safe='')
+                url_value = urllib.parse.quote(scientific_name, safe='')
 
-            return f'[{organism}]({link_prefix}{url_value})'
+            return f'[{scientific_name}]({link_prefix}{url_value})'
 
         data_df['organism_link'] = data_df.apply(create_organism_link, axis=1)
 
