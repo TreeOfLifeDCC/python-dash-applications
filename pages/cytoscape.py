@@ -666,6 +666,18 @@ def update_node_info(data, reset_clicks, tree_data):
     return " → ".join(path)
 
 
+@dash.callback(Output("search-sci", "value"),
+               Input("clear-sci", "n_clicks"), prevent_initial_call=True)
+def _clear_sci(n):
+    return ""
+
+
+@dash.callback(Output("search-common", "value"),
+               Input("clear-common", "n_clicks"), prevent_initial_call=True)
+def _clear_common(n):
+    return ""
+
+
 @dash.callback(
     Output("chk-common", "options"),
     Output("chk-sci", "options"),
