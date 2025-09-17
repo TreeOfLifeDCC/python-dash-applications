@@ -647,10 +647,15 @@ def update_project_from_url(search_string):
 @dash.callback(
     Output("node-info", "children"),
     Input("cytoscape-tree", "tapNodeData"),
+    Input("reset-all", "n_clicks"),
     State("full-tree-store", "data"),
     prevent_initial_call=True
 )
-def update_node_info(data, tree_data):
+def update_node_info(data, reset_clicks, tree_data):
+    trig = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
+    if trig == "reset-all.n_clicks":
+        return ""
+
     if not data or "id" not in data:
         raise PreventUpdate
     nd = build_node_dict(tree_data, {})
@@ -659,6 +664,18 @@ def update_node_info(data, tree_data):
         path.insert(0, nd[cur]["name"])
         cur = nd[cur].get("parent")
     return " → ".join(path)
+
+
+@dash.callback(Output("search-sci", "value"),
+               Input("clear-sci", "n_clicks"), prevent_initial_call=True)
+def _clear_sci(n):
+    return ""
+
+
+@dash.callback(Output("search-common", "value"),
+               Input("clear-common", "n_clicks"), prevent_initial_call=True)
+def _clear_common(n):
+    return ""
 
 
 @dash.callback(
