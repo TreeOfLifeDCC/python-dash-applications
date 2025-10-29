@@ -37,7 +37,6 @@ PROJECT_BIGQUERY_MAP = {
         "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
         "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
         "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
-
 }
 
 client = bigquery.Client(
@@ -517,32 +516,36 @@ layout = html.Div([
             dbc.Row(
                 [
                     dbc.Col(
-                        cyto.Cytoscape(
-                            id="cytoscape-tree",
-                            elements=[],
-                            layout={
-                                "name": "breadthfirst",
-                                "directed": True,
-                                "padding": 10,
-                                "animate": True,
-                                "animationDuration": 500
-                            },
-                            style={"width": "100%", "height": "568px"},
-                            stylesheet=[]
+                        EventListener(
+                            id="zoom-listener",
+                            events=[
+                                {
+                                    "event": "wheel",
+                                    "props": ["type", "deltaY", "ctrlKey", "metaKey"],
+                                    "preventDefault": True  # колесо над деревом не скроллит страницу
+                                },
+                                {
+                                    "event": "dblclick",
+                                    "props": ["type"],  # tapNodeData даст id узла
+                                    "preventDefault": True
+                                },
+                            ],
+                            children=cyto.Cytoscape(
+                                id="cytoscape-tree",
+                                elements=[],
+                                layout={"name": "breadthfirst", "directed": True, "padding": 10,
+                                        "animate": True, "animationDuration": 500},
+                                style={"width": "100%", "height": "568px"},
+                                stylesheet=[],
+                                zoom=1,
+                                minZoom=0.2,
+                                maxZoom=5,
+                                userZoomingEnabled=False,
+                                userPanningEnabled=True
+                            ),
                         ),
                         width=12
                     ),
-                    dbc.Col(
-                        EventListener(
-                            id="cytoscape-listener",
-                            events=[
-                                {"event": "tap", "props": ["type", "target.id"]},
-                                {"event": "dblclick", "props": ["type", "target.id"]}
-                            ],
-                            logging=True
-                        ),
-                        width=0
-                    )
                 ],
                 className="mb-3"
             ),
@@ -666,6 +669,27 @@ def update_node_info(data, reset_clicks, tree_data):
     return " → ".join(path)
 
 
+@dash.callback(
+    Output("cytoscape-tree", "zoom"),
+    Input("zoom-listener", "n_events"),
+    State("zoom-listener", "event"),
+    State("cytoscape-tree", "zoom"),
+    prevent_initial_call=True
+)
+def ctrl_zoom(_, evt, current_zoom):
+    if not evt or evt.get("type") != "wheel":
+        raise PreventUpdate
+
+    if not (evt.get("ctrlKey") or evt.get("metaKey")):
+        raise PreventUpdate
+
+    dy = evt.get("deltaY", 0) or 0
+    zoom = current_zoom or 1.0
+    factor = 0.9 if dy > 0 else 1.1
+    new_zoom = max(0.2, min(5.0, zoom * factor))
+    return round(new_zoom, 4)
+
+
 @dash.callback(Output("search-sci", "value"),
                Input("clear-sci", "n_clicks"), prevent_initial_call=True)
 def _clear_sci(n):
@@ -702,10 +726,10 @@ def _clear_common(n):
     Input("clear-common", "n_clicks"),
     Input("cytoscape-tree", "tapNodeData"),
     Input("reset-all", "n_clicks"),
-    Input("cytoscape-listener", "n_events"),
+    Input("zoom-listener", "n_events"),
     State("expanded-store", "data"),
     State("full-tree-store", "data"),
-    State("cytoscape-listener", "event"),
+    State("zoom-listener", "event"),
     prevent_initial_call=True
 )
 def master(
@@ -739,7 +763,12 @@ def master(
     search_sci = search_sci or ""
     search_common = search_common or ""
 
-    if "cytoscape-listener.n_events" in triggered and listener_event.get("type") == "dblclick":
+    if "zoom-listener.n_events" in triggered and (
+            not listener_event or listener_event.get("type") != "dblclick"
+    ):
+        raise PreventUpdate
+
+    if "zoom-listener.n_events" in triggered and listener_event.get("type") == "dblclick":
         if not tap_node or "id" not in tap_node:
             raise PreventUpdate
         node_id = tap_node["id"]
