@@ -6,3 +6,19 @@ label:has(input[type="checkbox"][disabled]) {
 input[type="checkbox"][disabled] {
     accent-color: #ccc;
 }
+
+html, body, [class*="dash"], [id*="content"], [id*="page"] {
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+
+*::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+  background: transparent !important;
+}
+
+* {
+  -ms-overflow-style: none;
+}
