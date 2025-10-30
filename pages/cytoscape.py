@@ -982,7 +982,13 @@ def master(
 
     # Build a partial tree for filtered results too
     new_tree = build_taxonomy_tree(filtered_records, RANKS)
-    new_elems = tree_to_elements(new_tree, [new_tree["id"]])
+
+    expanded_after_filter = [
+        node["id"] for node in build_node_dict(new_tree, {}).values()
+        if node.get("children")
+    ]
+
+    new_elems = tree_to_elements(new_tree, expanded_after_filter)
 
     # Create table rows directly from filtered records
     visible = []
@@ -1035,7 +1041,7 @@ def master(
         sci_sel,
         new_tree,
         visible,
-        [new_tree["id"]],  # Only root node is expanded initially
+        expanded_after_filter,
         new_elems,
         no_update,
         no_update,
