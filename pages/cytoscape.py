@@ -1,6 +1,7 @@
 import uuid
 import dash
-from dash import dcc, html, Output, Input, State, dash_table, callback_context, no_update
+from dash import dcc, html, Output, Input, State, dash_table, callback_context, \
+    no_update
 from dash.exceptions import PreventUpdate
 import dash_cytoscape as cyto
 from dash_extensions import EventListener
@@ -30,13 +31,13 @@ PORTAL_URL_PREFIX = {
 
 DATASETS = {}
 
-
 # BigQuery TABLE mapping for each project
 PROJECT_BIGQUERY_MAP = {
-        "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
-        "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
-        "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
-        "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
+    "dtol": "prj-ext-prod-biodiv-data-in.dtol.metadata",
+    "erga": "prj-ext-prod-biodiv-data-in.erga.metadata",
+    "asg": "prj-ext-prod-biodiv-data-in.asg.metadata",
+    "gbdp": "prj-ext-prod-biodiv-data-in.gbdp.metadata"
+
 }
 
 client = bigquery.Client(
@@ -67,7 +68,8 @@ def build_taxonomy_tree(flat_records, ranks_order, max_depth=None, target_node=N
     Returns:
         Root node of the tree
     """
-    root = {"id": str(uuid.uuid4()), "name": "Eukaryota", "parent": None, "children": []}
+    root = {"id": str(uuid.uuid4()), "name": "Eukaryota", "parent": None,
+            "children": []}
     for rec in flat_records:
         branch = []
         tree = rec.get("phylogenetic_tree", {})
@@ -107,7 +109,8 @@ def build_taxonomy_tree(flat_records, ranks_order, max_depth=None, target_node=N
         current = root
         for i, name in enumerate(branch):
             # Stop if we've reached max_depth and not targeting this specific node
-            if max_depth is not None and i > max_depth and (target_node is None or i != target_index + 1):
+            if max_depth is not None and i > max_depth and (
+                    target_node is None or i != target_index + 1):
                 break
 
             for child in current["children"]:
@@ -139,9 +142,11 @@ def make_full_elements(tree):
     nodes, edges = [], []
 
     def dfs(node):
-        nodes.append({"data": {"id": node["id"], "label": node["name"]}, "classes": "node"})
+        nodes.append(
+            {"data": {"id": node["id"], "label": node["name"]}, "classes": "node"})
         for child_node in node.get("children", []):
-            edges.append({"data": {"source": node["id"], "target": child_node["id"]}, "classes": "edge"})
+            edges.append({"data": {"source": node["id"], "target": child_node["id"]},
+                          "classes": "edge"})
             dfs(child_node)
 
     dfs(tree)
@@ -169,7 +174,8 @@ def tree_to_elements(node, expanded):
     if node["id"] in expanded:
         for child_node in node.get("children", []):
             elems.append(
-                {"data": {"source": node["id"], "target": child_node["id"]}, "classes": "edge"}
+                {"data": {"source": node["id"], "target": child_node["id"]},
+                 "classes": "edge"}
             )
             elems.extend(tree_to_elements(child_node, expanded))
     return elems
@@ -214,7 +220,6 @@ def load_data_polars(project_name):
         `{table_name}`
     """
 
-
     job_config = bigquery.QueryJobConfig(
         use_query_cache=True,
         use_legacy_sql=False,
@@ -242,13 +247,14 @@ def load_data_polars(project_name):
     for rank in RANKS:
         df = df.with_columns([
             pl.col("phylogenetic_tree")
-              .map_elements(lambda d: d.get(rank, {}).get("scientific_name", "Not Specified"),
-                            return_dtype=pl.Utf8)
-              .alias(f"{rank}_sci"),
+            .map_elements(
+                lambda d: d.get(rank, {}).get("scientific_name", "Not Specified"),
+                return_dtype=pl.Utf8)
+            .alias(f"{rank}_sci"),
             pl.col("phylogenetic_tree")
-              .map_elements(lambda d: d.get(rank, {}).get("common_name", "Not Specified"),
-                            return_dtype=pl.Utf8)
-              .alias(f"{rank}_com"),
+            .map_elements(lambda d: d.get(rank, {}).get("common_name", "Not Specified"),
+                          return_dtype=pl.Utf8)
+            .alias(f"{rank}_com"),
         ])
 
     # Create concatenated lists for scientific and common names
@@ -297,14 +303,16 @@ def init_project(project_name):
             # Create phylogeny path for this record
             phylogeny_path = ["Eukaryota"]
             for rank in RANKS:
-                rank_sci = rec.get("phylogenetic_tree", {}).get(rank, {}).get("scientific_name", "")
+                rank_sci = rec.get("phylogenetic_tree", {}).get(rank, {}).get(
+                    "scientific_name", "")
                 if rank_sci and rank_sci.lower() != "not specified":
                     phylogeny_path.append(f"{rank}: {rank_sci}")
             if sci and sci.lower() != "not specified":
                 phylogeny_path.append(sci)
 
             # Create table row
-            link_target = rec.get("tax_id", sci) if project_name in ("erga", "gbdp") else sci
+            link_target = rec.get("tax_id", sci) if project_name in ("erga",
+                                                                     "gbdp") else sci
             md_link = make_link(sci, project_name, link_target)
             rows_for_table.append({
                 "Scientific name": md_link,
@@ -312,7 +320,8 @@ def init_project(project_name):
                 "Current Status": rec.get("current_status", ""),
                 "Symbionts Status": rec.get("symbionts_status", ""),
                 "Phylogeny": " → ".join(phylogeny_path),
-                "node_id": ""  # No direct node ID since it might not be in the partial tree
+                "node_id": ""
+                # No direct node ID since it might not be in the partial tree
             })
 
     # Only load the root node and its immediate children for the tree visualization
@@ -341,9 +350,12 @@ def init_project(project_name):
         }
     ]
 
-    table_header_style = {"backgroundColor": color, "color": "black", "textAlign": "center"}
-    sci_filter_header_style = {"backgroundColor": color, "padding": "10px", "borderRadius": "5px"}
-    common_filter_header_style = {"backgroundColor": color, "padding": "10px", "borderRadius": "5px"}
+    table_header_style = {"backgroundColor": color, "color": "black",
+                          "textAlign": "center"}
+    sci_filter_header_style = {"backgroundColor": color, "padding": "10px",
+                               "borderRadius": "5px"}
+    common_filter_header_style = {"backgroundColor": color, "padding": "10px",
+                                  "borderRadius": "5px"}
 
     return (
         com_options,
@@ -407,7 +419,8 @@ layout = html.Div([
                             children=[
                                 html.Div(
                                     id="sci-filter-header",
-                                    style={"backgroundColor": "#ffffff", "padding": "10px", "borderRadius": "5px"},
+                                    style={"backgroundColor": "#ffffff",
+                                           "padding": "10px", "borderRadius": "5px"},
                                     children=[
                                         dbc.InputGroup(
                                             [
@@ -443,10 +456,15 @@ layout = html.Div([
                                             options=[],
                                             value=[],
                                             inline=False,
-                                            style={"display": "flex", "flexDirection": "column", "gap": "7px"},
-                                            labelStyle={"display": "flex", "alignItems": "center", "gap": "5px"}
+                                            style={"display": "flex",
+                                                   "flexDirection": "column",
+                                                   "gap": "7px"},
+                                            labelStyle={"display": "flex",
+                                                        "alignItems": "center",
+                                                        "gap": "5px"}
                                         ),
-                                        style={"overflowY": "auto", "maxHeight": "260px", "marginTop": "8px"}
+                                        style={"overflowY": "auto",
+                                               "maxHeight": "260px", "marginTop": "8px"}
                                     )
                                 )
                             ]
@@ -465,7 +483,8 @@ layout = html.Div([
                             children=[
                                 html.Div(
                                     id="common-filter-header",
-                                    style={"backgroundColor": "#ffffff", "padding": "10px", "borderRadius": "5px"},
+                                    style={"backgroundColor": "#ffffff",
+                                           "padding": "10px", "borderRadius": "5px"},
                                     children=[
                                         dbc.InputGroup(
                                             [
@@ -501,10 +520,15 @@ layout = html.Div([
                                             options=[],
                                             value=[],
                                             inline=False,
-                                            style={"display": "flex", "flexDirection": "column", "gap": "7px"},
-                                            labelStyle={"display": "flex", "alignItems": "center", "gap": "5px"}
+                                            style={"display": "flex",
+                                                   "flexDirection": "column",
+                                                   "gap": "7px"},
+                                            labelStyle={"display": "flex",
+                                                        "alignItems": "center",
+                                                        "gap": "5px"}
                                         ),
-                                        style={"overflowY": "auto", "maxHeight": "260px", "marginTop": "8px"}
+                                        style={"overflowY": "auto",
+                                               "maxHeight": "260px", "marginTop": "8px"}
                                     )
                                 )
                             ]
@@ -516,36 +540,33 @@ layout = html.Div([
             dbc.Row(
                 [
                     dbc.Col(
-                        EventListener(
-                            id="zoom-listener",
-                            events=[
-                                {
-                                    "event": "wheel",
-                                    "props": ["type", "deltaY", "ctrlKey", "metaKey"],
-                                    "preventDefault": True  # колесо над деревом не скроллит страницу
-                                },
-                                {
-                                    "event": "dblclick",
-                                    "props": ["type"],  # tapNodeData даст id узла
-                                    "preventDefault": True
-                                },
-                            ],
-                            children=cyto.Cytoscape(
-                                id="cytoscape-tree",
-                                elements=[],
-                                layout={"name": "breadthfirst", "directed": True, "padding": 10,
-                                        "animate": True, "animationDuration": 500},
-                                style={"width": "100%", "height": "568px"},
-                                stylesheet=[],
-                                zoom=1,
-                                minZoom=0.2,
-                                maxZoom=5,
-                                userZoomingEnabled=False,
-                                userPanningEnabled=True
-                            ),
+                        cyto.Cytoscape(
+                            id="cytoscape-tree",
+                            userZoomingEnabled=False,
+                            elements=[],
+                            layout={
+                                "name": "breadthfirst",
+                                "directed": True,
+                                "padding": 10,
+                                "animate": True,
+                                "animationDuration": 500
+                            },
+                            style={"width": "100%", "height": "568px"},
+                            stylesheet=[]
                         ),
                         width=12
                     ),
+                    dbc.Col(
+                        EventListener(
+                            id="cytoscape-listener",
+                            events=[
+                                {"event": "tap", "props": ["type", "target.id"]},
+                                {"event": "dblclick", "props": ["type", "target.id"]}
+                            ],
+                            logging=True
+                        ),
+                        width=0
+                    )
                 ],
                 className="mb-3"
             ),
@@ -587,10 +608,14 @@ layout = html.Div([
                                 dash_table.DataTable(
                                     id="tree-table",
                                     columns=[
-                                        {"name": "Scientific name", "id": "Scientific name", "presentation": "markdown"},
+                                        {"name": "Scientific name",
+                                         "id": "Scientific name",
+                                         "presentation": "markdown"},
                                         {"name": "Common name", "id": "Common name"},
-                                        {"name": "Current Status", "id": "Current Status"},
-                                        {"name": "Symbionts Status", "id": "Symbionts Status"},
+                                        {"name": "Current Status",
+                                         "id": "Current Status"},
+                                        {"name": "Symbionts Status",
+                                         "id": "Symbionts Status"},
                                         {"name": "Phylogeny", "id": "Phylogeny"},
                                     ],
                                     data=[],
@@ -606,7 +631,8 @@ layout = html.Div([
                                         "verticalAlign": "middle",
                                         "whiteSpace": "normal"
                                     },
-                                    css=[{"selector": "a", "rule": "text-decoration: none !important;"}]
+                                    css=[{"selector": "a",
+                                          "rule": "text-decoration: none !important;"}]
                                 ),
                                 style={
                                     "background": "#fff",
@@ -655,7 +681,8 @@ def update_project_from_url(search_string):
     prevent_initial_call=True
 )
 def update_node_info(data, reset_clicks, tree_data):
-    trig = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
+    trig = callback_context.triggered[0][
+        "prop_id"] if callback_context.triggered else ""
     if trig == "reset-all.n_clicks":
         return ""
 
@@ -667,27 +694,6 @@ def update_node_info(data, reset_clicks, tree_data):
         path.insert(0, nd[cur]["name"])
         cur = nd[cur].get("parent")
     return " → ".join(path)
-
-
-@dash.callback(
-    Output("cytoscape-tree", "zoom"),
-    Input("zoom-listener", "n_events"),
-    State("zoom-listener", "event"),
-    State("cytoscape-tree", "zoom"),
-    prevent_initial_call=True
-)
-def ctrl_zoom(_, evt, current_zoom):
-    if not evt or evt.get("type") != "wheel":
-        raise PreventUpdate
-
-    if not (evt.get("ctrlKey") or evt.get("metaKey")):
-        raise PreventUpdate
-
-    dy = evt.get("deltaY", 0) or 0
-    zoom = current_zoom or 1.0
-    factor = 0.9 if dy > 0 else 1.1
-    new_zoom = max(0.2, min(5.0, zoom * factor))
-    return round(new_zoom, 4)
 
 
 @dash.callback(Output("search-sci", "value"),
@@ -726,10 +732,10 @@ def _clear_common(n):
     Input("clear-common", "n_clicks"),
     Input("cytoscape-tree", "tapNodeData"),
     Input("reset-all", "n_clicks"),
-    Input("zoom-listener", "n_events"),
+    Input("cytoscape-listener", "n_events"),
     State("expanded-store", "data"),
     State("full-tree-store", "data"),
-    State("zoom-listener", "event"),
+    State("cytoscape-listener", "event"),
     prevent_initial_call=True
 )
 def master(
@@ -763,12 +769,8 @@ def master(
     search_sci = search_sci or ""
     search_common = search_common or ""
 
-    if "zoom-listener.n_events" in triggered and (
-            not listener_event or listener_event.get("type") != "dblclick"
-    ):
-        raise PreventUpdate
-
-    if "zoom-listener.n_events" in triggered and listener_event.get("type") == "dblclick":
+    if "cytoscape-listener.n_events" in triggered and listener_event.get(
+            "type") == "dblclick":
         if not tap_node or "id" not in tap_node:
             raise PreventUpdate
         node_id = tap_node["id"]
@@ -780,13 +782,15 @@ def master(
             if "source" in data and "target" in data:
                 children_map.setdefault(data["source"], []).append(data["target"])
         leaf_ids = [nid for nid in subs if not children_map.get(nid)]
-        leaf_rows = [r for r in tree_to_table_rows(tree_data) if r["node_id"] in leaf_ids]
+        leaf_rows = [r for r in tree_to_table_rows(tree_data) if
+                     r["node_id"] in leaf_ids]
 
         visible = []
         for row in leaf_rows:
             sci_plain = row["Scientific name"]
             rec = next((x for x in records if x["scientific_name"] == sci_plain), {})
-            link_target = rec.get("tax_id", sci_plain) if project_name in ("erga", "gbdp") else sci_plain
+            link_target = rec.get("tax_id", sci_plain) if project_name in ("erga",
+                                                                           "gbdp") else sci_plain
             md_link = make_link(sci_plain, project_name, link_target)
             visible.append({
                 "Scientific name": md_link,
@@ -844,11 +848,13 @@ def master(
             # If this is a leaf node (scientific name without rank prefix)
             if ":" not in node_name and node_name not in ("Eukaryota", "Not Specified"):
                 # Find the record for this scientific name
-                matching_record = next((r for r in records if r.get("scientific_name") == node_name), None)
+                matching_record = next(
+                    (r for r in records if r.get("scientific_name") == node_name), None)
 
                 if matching_record:
                     # Build a subtree for this record, focusing on expanding this specific node
-                    subtree = build_taxonomy_tree([matching_record], RANKS, target_node=node_name)
+                    subtree = build_taxonomy_tree([matching_record], RANKS,
+                                                  target_node=node_name)
 
                     # Find the path to this node in the current tree
                     path = []
@@ -877,12 +883,15 @@ def master(
 
         if nid in expanded_nodes:
             to_remove = set()
+
             def collect(x):
                 for c in nd[x]["children"]:
                     to_remove.add(c["id"])
                     collect(c["id"])
+
             collect(nid)
-            new_expanded = [e for e in expanded_nodes if e not in to_remove and e != nid]
+            new_expanded = [e for e in expanded_nodes if
+                            e not in to_remove and e != nid]
         else:
             new_expanded = expanded_nodes + [nid]
         new_elems = tree_to_elements(tree_data, new_expanded)
@@ -911,7 +920,8 @@ def master(
                 rec["phylogenetic_tree_scientific_names"],
                 rec["phylogenetic_tree_common_names"]
             )
-            if (not common_sel or cm in common_sel) and sci and sci.lower() != "not specified"
+            if (
+                           not common_sel or cm in common_sel) and sci and sci.lower() != "not specified"
         }
         if search_sci:
             ss = search_sci.lower()
@@ -964,8 +974,10 @@ def master(
 
     filtered_records = [
         rec for rec in records
-        if (not sci_sel or any(s in rec["phylogenetic_tree_scientific_names"] for s in sci_sel))
-           and (not common_sel or any(c in rec["phylogenetic_tree_common_names"] for c in common_sel))
+        if (not sci_sel or any(
+            s in rec["phylogenetic_tree_scientific_names"] for s in sci_sel))
+           and (not common_sel or any(
+            c in rec["phylogenetic_tree_common_names"] for c in common_sel))
     ]
 
     # Build a partial tree for filtered results too
@@ -980,14 +992,16 @@ def master(
             # Create phylogeny path for this record
             phylogeny_path = ["Eukaryota"]
             for rank in RANKS:
-                rank_sci = rec.get("phylogenetic_tree", {}).get(rank, {}).get("scientific_name", "")
+                rank_sci = rec.get("phylogenetic_tree", {}).get(rank, {}).get(
+                    "scientific_name", "")
                 if rank_sci and rank_sci.lower() != "not specified":
                     phylogeny_path.append(f"{rank}: {rank_sci}")
             if sci and sci.lower() != "not specified":
                 phylogeny_path.append(sci)
 
             # Create table row
-            link_target = rec.get("tax_id", sci) if project_name in ("erga", "gbdp") else sci
+            link_target = rec.get("tax_id", sci) if project_name in ("erga",
+                                                                     "gbdp") else sci
             md_link = make_link(sci, project_name, link_target)
             visible.append({
                 "Scientific name": md_link,
@@ -1001,7 +1015,8 @@ def master(
         sci for rec in records for sci, cm in zip(
             rec["phylogenetic_tree_scientific_names"],
             rec["phylogenetic_tree_common_names"]
-        ) if (not common_sel or cm in common_sel) and sci and sci.lower() != "not specified"
+        ) if
+        (not common_sel or cm in common_sel) and sci and sci.lower() != "not specified"
     }
     allowed_com = {
         cm for rec in records for sci, cm in zip(
