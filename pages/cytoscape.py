@@ -201,6 +201,11 @@ def get_subtree_nodes(node_id, elements):
 
 
 def load_data_polars(project_name):
+    # `project_name` selects a BigQuery table *identifier* and cannot be a query
+    # parameter, so it must be constrained to the known allowlist.
+    if project_name not in PROJECT_BIGQUERY_MAP:
+        project_name = "dtol"
+
     if project_name in DATASETS:
         return DATASETS[project_name]
 
