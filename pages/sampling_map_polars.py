@@ -30,8 +30,19 @@ PORTAL_URL_PREFIX = {
     "gbdp": "https://www.ebi.ac.uk/biodiversity/data_portal/"
 }
 
+# `project_name` is used as a BigQuery dataset *identifier* (it cannot be a query
+# parameter), so it must be constrained to a strict allowlist to prevent SQL
+# injection via the `projectName` URL parameter / callback inputs.
+ALLOWED_PROJECTS = {"dtol", "erga", "asg", "gbdp"}
+DEFAULT_PROJECT = "dtol"
+
+
+def validate_project(project_name: str) -> str:
+    return project_name if project_name in ALLOWED_PROJECTS else DEFAULT_PROJECT
+
 
 def load_data(project_name: str) -> dict:
+    project_name = validate_project(project_name)
     if project_name in DATASETS:
         return DATASETS[project_name]
 
@@ -129,7 +140,7 @@ def load_data_cached(project_name):
 
 
 def layout(**kwargs):
-    project_name = kwargs.get("projectName", "dtol")
+    project_name = validate_project(kwargs.get("projectName", "dtol"))
 
     # load project's dataset
     load_data(project_name)
@@ -613,7 +624,8 @@ def update_checklists(selected_organisms, selected_common_names, selected_curren
                       checklist_selection_order, project_name,
                       click_flag_value, selection_flag_value, selected_data, click_data, selected_geotags):
 
-    df_lazy = DATASETS[project_name]["df_data"].lazy()
+    project_name = validate_project(project_name)
+    df_lazy = load_data(project_name)["df_data"].lazy()
 
     if selected_geotags:
         df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
@@ -962,7 +974,8 @@ def build_map(
     project_name,
     selected_geotags
 ):
-    df_lazy = DATASETS[project_name]["grouped_data"].lazy()
+    project_name = validate_project(project_name)
+    df_lazy = load_data(project_name)["grouped_data"].lazy()
 
     if selected_geotags:
         df_lazy = df_lazy.filter(pl.col("geotag").is_in(selected_geotags))
@@ -1144,7 +1157,8 @@ def update_click_flag(click_data, selected_data, selected_organisms, selected_co
                       selected_experiment_types, prev_click_data,
                       clear_org_clicks, clear_common_clicks, clear_status_clicks, clear_experiment_type_clicks,
                       project_name):
-    df_data: pl.DataFrame = DATASETS[project_name]["df_data"]
+    project_name = validate_project(project_name)
+    df_data: pl.DataFrame = load_data(project_name)["df_data"]
 
     triggered_id = callback_context.triggered[0]["prop_id"].split(".")[0]
     checklist_ids = {
@@ -1218,7 +1232,8 @@ def build_table(click_flag_value, selection_flag_value, selected_data, click_dat
                 project_name, selected_geotags):
     print(f"click_flag_value: {click_flag_value}")
 
-    filtered_df = DATASETS[project_name]["df_data"].lazy()
+    project_name = validate_project(project_name)
+    filtered_df = load_data(project_name)["df_data"].lazy()
 
     if selected_geotags:
         filtered_df = filtered_df.filter(pl.col("geotag").is_in(selected_geotags))

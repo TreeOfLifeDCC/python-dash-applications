@@ -59,46 +59,82 @@ PORTAL_URL_PREFIX = {
     "gbdp": "https://www.ebi.ac.uk/biodiversity/data_portal/"
 }
 
-# get base data
-def build_table_data_query(project_name: str, tab: str, filters: dict, offset: int = 0,
-                           limit: int = 10) -> str:
+DEFAULT_PROJECT = "dtol"
 
-    view_name = VIEW_MAPPINGS[project_name]["table_data"]
+# cap to bound query cost (prevents cost-amplification via crafted filters)
+MAX_BYTES_BILLED = 10 ** 12
 
-    where_conditions = [f"project_name = '{project_name}'"]
+
+def validate_project(project_name: str) -> str:
+    # `project_name` selects a BigQuery view *identifier* and cannot be a query
+    # parameter, so it must be constrained to the known allowlist.
+    return project_name if project_name in VIEW_MAPPINGS else DEFAULT_PROJECT
+
+
+def _build_filter_conditions(project_name: str, tab: str, filters: dict):
+    """Build a parameterized WHERE clause for the table views.
+
+    Returns (where_clause, [ScalarQueryParameter, ...]). All user-controlled
+    values are bound as query parameters - never interpolated into SQL.
+    """
+    where_conditions = ["project_name = @project_name"]
+    params = [bigquery.ScalarQueryParameter("project_name", "STRING", project_name)]
+
+    def add_eq(column: str, value, param_name: str, param_type: str = "STRING"):
+        where_conditions.append(f"{column} = @{param_name}")
+        params.append(bigquery.ScalarQueryParameter(param_name, param_type, value))
 
     for key, value in filters.items():
         if value and value != "NULL":
             if tab == 'metadata':
                 if key == "sex":
-                    where_conditions.append(f"sex = '{value}'")
+                    add_eq("sex", value, "sex")
                 elif key == "lifestage":
-                    where_conditions.append(f"lifestage = '{value}'")
+                    add_eq("lifestage", value, "lifestage")
                 elif key == "habitat":
-                    where_conditions.append(f"habitat = '{value}'")
+                    add_eq("habitat", value, "habitat")
             elif tab == "rawdata":
                 if key == "instrument_platform":
-                    where_conditions.append(f"instrument_platform = '{value}'")
+                    add_eq("instrument_platform", value, "instrument_platform")
                 elif key == "instrument_model":
-                    where_conditions.append(f"instrument_model = '{value}'")
+                    add_eq("instrument_model", value, "instrument_model")
                 elif key == "library_construction_protocol":
-                    where_conditions.append(f"library_construction_protocol = '{value}'")
+                    add_eq("library_construction_protocol", value,
+                           "library_construction_protocol")
                 elif key == "date_filter":
                     # Date filtering
                     date_info = value
                     if isinstance(date_info, str):
-                        where_conditions.append(f"first_public = '{date_info}'")
+                        add_eq("first_public", date_info, "first_public")
                     elif isinstance(date_info, dict):
                         start_date = date_info.get("start")
                         end_date = date_info.get("end")
                         if start_date:
-                            where_conditions.append(f"first_public >= '{start_date}'")
+                            where_conditions.append("first_public >= @first_public_start")
+                            params.append(bigquery.ScalarQueryParameter(
+                                "first_public_start", "STRING", start_date))
                         if end_date:
-                            where_conditions.append(f"first_public <= '{end_date}'")
+                            where_conditions.append("first_public <= @first_public_end")
+                            params.append(bigquery.ScalarQueryParameter(
+                                "first_public_end", "STRING", end_date))
 
     where_clause = " AND ".join(where_conditions)
+    return where_clause, params
 
-    return f"""
+
+# get base data
+def build_table_data_query(project_name: str, tab: str, filters: dict, offset: int = 0,
+                           limit: int = 10):
+
+    # view_name is selected from a fixed allowlist (not user text), so it is
+    # safe to interpolate as the table identifier.
+    view_name = VIEW_MAPPINGS[project_name]["table_data"]
+
+    where_clause, params = _build_filter_conditions(project_name, tab, filters)
+    params.append(bigquery.ScalarQueryParameter("_limit", "INT64", int(limit)))
+    params.append(bigquery.ScalarQueryParameter("_offset", "INT64", int(offset)))
+
+    query = f"""
     SELECT DISTINCT
         scientific_name,
         tax_id,
@@ -108,53 +144,24 @@ def build_table_data_query(project_name: str, tab: str, filters: dict, offset: i
     FROM `{view_name}`
     WHERE {where_clause}
     ORDER BY current_status
-    LIMIT {limit}
-    OFFSET {offset}
+    LIMIT @_limit
+    OFFSET @_offset
     """
+    return query, params
 
 
-def build_table_count_query(project_name: str, tab: str, filters: dict) -> str:
+def build_table_count_query(project_name: str, tab: str, filters: dict):
 
     view_name = VIEW_MAPPINGS[project_name]["table_data"]
 
-    where_conditions = [f"project_name = '{project_name}'"]
+    where_clause, params = _build_filter_conditions(project_name, tab, filters)
 
-    for key, value in filters.items():
-        if value and value != "NULL":
-            if tab == 'metadata':
-                if key == "sex":
-                    where_conditions.append(f"sex = '{value}'")
-                elif key == "lifestage":
-                    where_conditions.append(f"lifestage = '{value}'")
-                elif key == "habitat":
-                    where_conditions.append(f"habitat = '{value}'")
-            elif tab == "rawdata":
-                if key == "instrument_platform":
-                    where_conditions.append(f"instrument_platform = '{value}'")
-                elif key == "instrument_model":
-                    where_conditions.append(f"instrument_model = '{value}'")
-                elif key == "library_construction_protocol":
-                    where_conditions.append(f"library_construction_protocol = '{value}'")
-                elif key == "date_filter":
-                    # Date filtering
-                    date_info = value
-                    if isinstance(date_info, str):
-                        where_conditions.append(f"first_public = '{date_info}'")
-                    elif isinstance(date_info, dict):
-                        start_date = date_info.get("start")
-                        end_date = date_info.get("end")
-                        if start_date:
-                            where_conditions.append(f"first_public >= '{start_date}'")
-                        if end_date:
-                            where_conditions.append(f"first_public <= '{end_date}'")
-
-    where_clause = " AND ".join(where_conditions)
-
-    return f"""
+    query = f"""
         SELECT COUNT(DISTINCT tax_id) as total_count
         FROM `{view_name}`
         WHERE {where_clause}
         """
+    return query, params
 
 
 
@@ -163,6 +170,7 @@ def build_table_count_query(project_name: str, tab: str, filters: dict) -> str:
 # load pre-aggregated data for charts
 def load_metadata_aggregated_data(project_name: str) -> dict:
 
+    project_name = validate_project(project_name)
     if project_name in METADATA_AGGREGATED_DATA:
         return METADATA_AGGREGATED_DATA[project_name]
 
@@ -229,6 +237,7 @@ def get_metadata_chart_data(project_name: str, dimension: str, filters: dict) ->
 # raw_data
 def load_rawdata_aggregated_data(project_name: str) -> dict:
 
+    project_name = validate_project(project_name)
     if project_name in RAWDATA_AGGREGATED_DATA:
         return RAWDATA_AGGREGATED_DATA[project_name]
 
@@ -540,17 +549,33 @@ def build_pie_optimized(df: pl.DataFrame, col_name: str, selected_val: str, type
 
 def load_table_data(project_name: str, filters: dict, page_current: int, page_size: int, tab: str):
 
+    project_name = validate_project(project_name)
+    # coerce pagination to integers - these flow into LIMIT/OFFSET and offset arithmetic
+    page_current = int(page_current)
+    page_size = int(page_size)
     offset = page_current * page_size
 
-    # table data using views
-    data_query = build_table_data_query(project_name, tab, filters, offset, page_size)
-    count_query = build_table_count_query(project_name, tab, filters)
+    # table data using views (parameterized)
+    data_query, data_params = build_table_data_query(project_name, tab, filters, offset, page_size)
+    count_query, count_params = build_table_count_query(project_name, tab, filters)
 
-    data_job = client.query(data_query)
+    data_job = client.query(
+        data_query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=data_params,
+            maximum_bytes_billed=MAX_BYTES_BILLED,
+        ),
+    )
     data_df = data_job.to_dataframe()
 
     # pagination count
-    count_job = client.query(count_query)
+    count_job = client.query(
+        count_query,
+        job_config=bigquery.QueryJobConfig(
+            query_parameters=count_params,
+            maximum_bytes_billed=MAX_BYTES_BILLED,
+        ),
+    )
     count_result = count_job.to_dataframe()
     total_count = count_result['total_count'].iloc[0] if not count_result.empty else 0
 
@@ -577,7 +602,7 @@ def load_table_data(project_name: str, filters: dict, page_current: int, page_si
 
 
 def layout(**kwargs):
-    project_name = kwargs.get("projectName", "dtol")
+    project_name = validate_project(kwargs.get("projectName", "dtol"))
 
     # load aggregated data
     load_metadata_aggregated_data(project_name)
@@ -887,6 +912,7 @@ def build_metadata_charts(pie_sex_click, pie_lifestage_click, pie_habitat_click,
     if active_tab != "metadata":
         raise PreventUpdate
 
+    project_name = validate_project(project_name)
     triggered_id = ctx.triggered_id
 
     stored_selection = selected_pie_input or {"sex": None, "lifestage": None, "habitat": None}
@@ -1085,6 +1111,7 @@ def build_rawdata_charts(instrument_platform_click, instrument_model_click,
     if active_tab != "rawdata":
         raise PreventUpdate
 
+    project_name = validate_project(project_name)
     triggered_id = ctx.triggered_id
 
     stored_selection = selected_charts_input or {"instrument_platform": None, "instrument_model": None,
