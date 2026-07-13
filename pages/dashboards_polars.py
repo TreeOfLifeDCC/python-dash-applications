@@ -15,7 +15,7 @@ from google.oauth2 import service_account
 dash.register_page(
     __name__,
     path_template="/dashboards",
-    title="Dashboards",
+    title="Sample and Sequencing Metadata",
 )
 
 # initialize BigQuery client
